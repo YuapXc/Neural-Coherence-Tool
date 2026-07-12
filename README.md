@@ -1,10 +1,7 @@
 # Neural Coherence Tool
 
 基于 [libxposed API 102](https://libxposed.github.io/api/index.html) 的 LSPosed 模块，
-为目标应用的「同调网络」页面提供好友状态扫描与顺序互动工具。
-
-> 本项目仅适用于你有权测试和使用的账号及应用环境。批量操作应遵守目标服务的使用规则，
-> 并合理控制请求频率。
+为方舟雷达的官方 APP [同调计划](https://www.tongdiaojihua.com/) 提供顺序互动。
 
 ## 功能
 
