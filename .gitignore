@@ -1,0 +1,12 @@
+/.gradle/
+/local.properties
+/**/build/
+*.iml
+/.idea/
+*.jks
+*.keystore
+signing.properties
+*.apk
+*.log
+captures/
+reverse-output/
