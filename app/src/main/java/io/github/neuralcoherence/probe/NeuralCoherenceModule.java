@@ -10,11 +10,14 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Gravity;
-import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -24,8 +27,10 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.ref.WeakReference;
 import java.net.ConnectException;
@@ -37,6 +42,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
@@ -58,6 +64,15 @@ public final class NeuralCoherenceModule extends XposedModule {
     private static final int PAGE_SIZE = 50;
     private static final long MIN_ACTION_DELAY_MS = 500L;
     private static final long MAX_ACTION_DELAY_MS = 1000L;
+    private static final long SEMANTIC_POLL_INTERVAL_MS = 1500L;
+    private static final long SEMANTIC_POLL_COALESCE_MS = 250L;
+    private static final long[] SEMANTIC_TAP_CHECK_DELAYS_MS = {150L, 500L, 1000L};
+    private static final int SEMANTIC_ANCHOR_NETWORK = 1;
+    private static final int SEMANTIC_ANCHOR_RECORDS = 1 << 1;
+    private static final int SEMANTIC_ANCHOR_REQUESTS = 1 << 2;
+    private static final int SEMANTIC_BLOCKED = 1 << 3;
+    private static final int SEMANTIC_MAIN_ANCHORS = SEMANTIC_ANCHOR_NETWORK
+            | SEMANTIC_ANCHOR_RECORDS | SEMANTIC_ANCHOR_REQUESTS;
     private static final ExecutorService NETWORK_EXECUTOR = Executors.newSingleThreadExecutor();
     private static final AtomicBoolean interactionRunning = new AtomicBoolean(false);
     private static final AtomicBoolean stopRequested = new AtomicBoolean(false);
@@ -66,11 +81,26 @@ public final class NeuralCoherenceModule extends XposedModule {
     private volatile String savedStatus = "待扫描";
     private volatile int savedProgress;
     private volatile int savedMaximum;
-    private volatile int currentTab = -1;
-    private volatile boolean modalSuppressed;
-    private float touchDownX;
-    private float touchDownY;
-    private long touchDownAt;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private int semanticMonitorGeneration;
+    private int semanticTapGeneration;
+    private Boolean lastSemanticVisibility;
+    private long lastSemanticCheckAt;
+    private float semanticTouchDownX;
+    private float semanticTouchDownY;
+    private long semanticTouchDownAt;
+    private boolean semanticTouchMoved;
+    private boolean semanticAccessFailureLogged;
+    private WeakReference<View> cachedFlutterView = new WeakReference<>(null);
+    private WeakReference<Object> cachedAccessibilityBridge = new WeakReference<>(null);
+    private Field accessibilityBridgeField;
+    private Field semanticsTreeField;
+    private Class<?> cachedSemanticsNodeClass;
+    private Field semanticsLabelField;
+    private Field semanticsValueField;
+    private Field semanticsHintField;
+    private Field semanticsTooltipField;
+    private Field semanticsIdentifierField;
 
     @Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
@@ -95,25 +125,25 @@ public final class NeuralCoherenceModule extends XposedModule {
                 Object result = chain.proceed();
                 log(Log.INFO, TAG, "FlutterActivity resumed: "
                         + chain.getThisObject().getClass().getName());
-                installScanButton((Activity) chain.getThisObject());
+                Activity activity = (Activity) chain.getThisObject();
+                installScanButton(activity);
+                startSemanticMonitor(activity);
                 return result;
+            });
+            Method onPause = activityClass.getDeclaredMethod("onPause");
+            hook(onPause).setId(TAG + ":FlutterActivity#onPause").intercept(chain -> {
+                stopSemanticMonitor();
+                return chain.proceed();
             });
             Method dispatchTouchEvent = activityClass.getMethod("dispatchTouchEvent", MotionEvent.class);
             hook(dispatchTouchEvent).setId(TAG + ":FlutterActivity#dispatchTouchEvent")
                     .intercept(chain -> {
                         MotionEvent event = (MotionEvent) chain.getArg(0);
                         Activity activity = (Activity) chain.getThisObject();
-                        trackPageTouch(activity, event);
-                        return chain.proceed();
-                    });
-            Method dispatchKeyEvent = activityClass.getMethod("dispatchKeyEvent", KeyEvent.class);
-            hook(dispatchKeyEvent).setId(TAG + ":FlutterActivity#dispatchKeyEvent")
-                    .intercept(chain -> {
-                        KeyEvent event = (KeyEvent) chain.getArg(0);
+                        boolean semanticTap = trackSemanticTouch(activity, event);
                         Object result = chain.proceed();
-                        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK
-                                && event.getAction() == KeyEvent.ACTION_UP) {
-                            restorePanelAfterBack((Activity) chain.getThisObject());
+                        if (semanticTap) {
+                            scheduleSemanticChecks(activity);
                         }
                         return result;
                     });
@@ -133,8 +163,7 @@ public final class NeuralCoherenceModule extends XposedModule {
         currentActivity = new WeakReference<>(activity);
         currentPanel = new WeakReference<>(panel);
         panel.root.setTag(PANEL_TAG);
-        panel.root.setVisibility(currentTab == 2 && !modalSuppressed
-                ? View.VISIBLE : View.GONE);
+        panel.root.setVisibility(View.GONE);
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 128), dp(activity, 44));
         params.gravity = Gravity.TOP | Gravity.END;
         params.topMargin = dp(activity, 126);
@@ -153,72 +182,235 @@ public final class NeuralCoherenceModule extends XposedModule {
         });
     }
 
-    private void trackPageTouch(Activity activity, MotionEvent event) {
+    private void startSemanticMonitor(Activity activity) {
+        int generation = ++semanticMonitorGeneration;
+        semanticTapGeneration++;
+        lastSemanticVisibility = null;
+        lastSemanticCheckAt = 0L;
+        cachedFlutterView = new WeakReference<>(null);
+        cachedAccessibilityBridge = new WeakReference<>(null);
+        runSemanticMonitor(activity, generation);
+    }
+
+    private void stopSemanticMonitor() {
+        semanticMonitorGeneration++;
+        semanticTapGeneration++;
+    }
+
+    private void runSemanticMonitor(Activity activity, int generation) {
+        if (generation != semanticMonitorGeneration || activity.isFinishing()
+                || activity.isDestroyed()) {
+            return;
+        }
+        long elapsed = SystemClock.uptimeMillis() - lastSemanticCheckAt;
+        if (elapsed >= SEMANTIC_POLL_COALESCE_MS) {
+            updatePanelVisibilityFromSemantics(activity);
+        }
+        mainHandler.postDelayed(() -> runSemanticMonitor(activity, generation),
+                SEMANTIC_POLL_INTERVAL_MS);
+    }
+
+    private void scheduleSemanticChecks(Activity activity) {
+        int monitorGeneration = semanticMonitorGeneration;
+        int tapGeneration = ++semanticTapGeneration;
+        for (long delay : SEMANTIC_TAP_CHECK_DELAYS_MS) {
+            mainHandler.postDelayed(() -> {
+                if (monitorGeneration == semanticMonitorGeneration
+                        && tapGeneration == semanticTapGeneration
+                        && !activity.isFinishing()
+                        && !activity.isDestroyed()) {
+                    updatePanelVisibilityFromSemantics(activity);
+                }
+            }, delay);
+        }
+    }
+
+    private boolean trackSemanticTouch(Activity activity, MotionEvent event) {
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
-            touchDownX = event.getX();
-            touchDownY = event.getY();
-            touchDownAt = event.getEventTime();
-            return;
+            semanticTouchDownX = event.getX();
+            semanticTouchDownY = event.getY();
+            semanticTouchDownAt = event.getEventTime();
+            semanticTouchMoved = false;
+            return false;
         }
-        if (action != MotionEvent.ACTION_UP) {
-            return;
+        if (action == MotionEvent.ACTION_MOVE && !semanticTouchMoved) {
+            float dx = event.getX() - semanticTouchDownX;
+            float dy = event.getY() - semanticTouchDownY;
+            float slop = dp(activity, 12);
+            semanticTouchMoved = dx * dx + dy * dy > slop * slop;
+            return false;
         }
-
-        float dx = event.getX() - touchDownX;
-        float dy = event.getY() - touchDownY;
-        boolean shortTap = dx * dx + dy * dy <= dp(activity, 12) * dp(activity, 12)
-                && event.getEventTime() - touchDownAt <= 500L;
-        if (!shortTap) {
-            return;
+        if (action == MotionEvent.ACTION_CANCEL) {
+            semanticTouchMoved = true;
+            return false;
         }
-
-        int height = activity.getResources().getDisplayMetrics().heightPixels;
-        int width = activity.getResources().getDisplayMetrics().widthPixels;
-        int navigationTop = height - dp(activity, 92);
-        if (touchDownY >= navigationTop && event.getY() >= navigationTop) {
-            currentTab = Math.min(3, Math.max(0, (int) (event.getX() * 4 / width)));
-            modalSuppressed = false;
-            applyPanelVisibility(activity);
-            return;
-        }
-
-        float xRatio = event.getX() / width;
-        float yRatio = event.getY() / height;
-        if (currentTab == 2 && modalSuppressed
-                && xRatio >= 0.84f && yRatio >= 0.12f && yRatio <= 0.20f) {
-            restorePanelAfterBack(activity);
-            return;
-        }
-
-        // The two summary cards open Flutter modal routes. Native overlays must yield to them.
-        if (currentTab == 2 && !modalSuppressed && yRatio >= 0.22f && yRatio <= 0.34f) {
-            modalSuppressed = true;
-            applyPanelVisibility(activity);
-        }
+        return action == MotionEvent.ACTION_UP
+                && !semanticTouchMoved
+                && event.getEventTime() - semanticTouchDownAt <= 800L;
     }
 
-    private void restorePanelAfterBack(Activity activity) {
-        if (!modalSuppressed) {
-            return;
-        }
-        View content = activity.findViewById(android.R.id.content);
-        content.postDelayed(() -> {
-            modalSuppressed = false;
-            applyPanelVisibility(activity);
-        }, 250L);
-    }
-
-    private void applyPanelVisibility(Activity activity) {
+    private void updatePanelVisibilityFromSemantics(Activity activity) {
+        lastSemanticCheckAt = SystemClock.uptimeMillis();
+        boolean visible = isSyncNetworkMainPage(activity);
         View content = activity.findViewById(android.R.id.content);
         if (content == null) {
             return;
         }
         View panel = content.findViewWithTag(PANEL_TAG);
-        if (panel != null) {
-            panel.setVisibility(currentTab == 2 && !modalSuppressed
-                    ? View.VISIBLE : View.GONE);
+        int targetVisibility = visible ? View.VISIBLE : View.GONE;
+        if (panel != null && panel.getVisibility() != targetVisibility) {
+            panel.setVisibility(targetVisibility);
         }
+        if (lastSemanticVisibility == null || lastSemanticVisibility != visible) {
+            lastSemanticVisibility = visible;
+            log(Log.INFO, TAG, "Semantic page match=" + visible);
+        }
+    }
+
+    private boolean isSyncNetworkMainPage(Activity activity) {
+        try {
+            View flutterView = getFlutterView(activity);
+            if (flutterView == null) {
+                return false;
+            }
+
+            Object bridge = getAccessibilityBridge(flutterView);
+            if (bridge == null) {
+                return false;
+            }
+
+            Object treeValue = semanticsTreeField.get(bridge);
+            if (!(treeValue instanceof Map)) {
+                return false;
+            }
+            Map<?, ?> semanticsTree = (Map<?, ?>) treeValue;
+            int state = 0;
+            int visited = 0;
+            for (Object node : semanticsTree.values()) {
+                if (node == null || visited++ >= 2000) {
+                    continue;
+                }
+                ensureSemanticsNodeFields(node.getClass());
+                state = inspectSemanticText(state, semanticsLabelField.get(node));
+                state = inspectSemanticText(state, semanticsValueField.get(node));
+                state = inspectSemanticText(state, semanticsHintField.get(node));
+                state = inspectSemanticText(state, semanticsTooltipField.get(node));
+                state = inspectSemanticText(state, semanticsIdentifierField.get(node));
+                if ((state & SEMANTIC_BLOCKED) != 0) {
+                    return false;
+                }
+            }
+            semanticAccessFailureLogged = false;
+            return (state & SEMANTIC_MAIN_ANCHORS) == SEMANTIC_MAIN_ANCHORS;
+        } catch (Throwable error) {
+            if (!semanticAccessFailureLogged) {
+                semanticAccessFailureLogged = true;
+                log(Log.WARN, TAG, "Flutter semantics unavailable: "
+                        + error.getClass().getSimpleName());
+            }
+            return false;
+        }
+    }
+
+    private View getFlutterView(Activity activity) {
+        View cached = cachedFlutterView.get();
+        if (cached != null && cached.isAttachedToWindow()) {
+            return cached;
+        }
+        View flutterView = findFlutterView(activity.getWindow().getDecorView());
+        cachedFlutterView = new WeakReference<>(flutterView);
+        cachedAccessibilityBridge = new WeakReference<>(null);
+        return flutterView;
+    }
+
+    private Object getAccessibilityBridge(View flutterView) throws ReflectiveOperationException {
+        Object cached = cachedAccessibilityBridge.get();
+        if (cached != null) {
+            return cached;
+        }
+        if (accessibilityBridgeField == null
+                || !accessibilityBridgeField.getDeclaringClass().isAssignableFrom(
+                flutterView.getClass())) {
+            accessibilityBridgeField = findField(flutterView.getClass(), "accessibilityBridge");
+        }
+        Object bridge = accessibilityBridgeField.get(flutterView);
+        if (bridge == null) {
+            return null;
+        }
+        if (semanticsTreeField == null
+                || !semanticsTreeField.getDeclaringClass().isAssignableFrom(bridge.getClass())) {
+            semanticsTreeField = findField(bridge.getClass(), "flutterSemanticsTree");
+        }
+        cachedAccessibilityBridge = new WeakReference<>(bridge);
+        return bridge;
+    }
+
+    private void ensureSemanticsNodeFields(Class<?> nodeClass)
+            throws ReflectiveOperationException {
+        if (nodeClass == cachedSemanticsNodeClass) {
+            return;
+        }
+        semanticsLabelField = findField(nodeClass, "label");
+        semanticsValueField = findField(nodeClass, "value");
+        semanticsHintField = findField(nodeClass, "hint");
+        semanticsTooltipField = findField(nodeClass, "tooltip");
+        semanticsIdentifierField = findField(nodeClass, "identifier");
+        cachedSemanticsNodeClass = nodeClass;
+    }
+
+    private View findFlutterView(View view) {
+        if ("io.flutter.embedding.android.FlutterView".equals(view.getClass().getName())) {
+            return view;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View result = findFlutterView(group.getChildAt(i));
+                if (result != null) {
+                    return result;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Field findField(Class<?> type, String name)
+            throws ReflectiveOperationException {
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    private static int inspectSemanticText(int state, Object value) {
+        if (!(value instanceof CharSequence)) {
+            return state;
+        }
+        String text = value.toString();
+        if (text.contains("同调网络")) {
+            state |= SEMANTIC_ANCHOR_NETWORK;
+        }
+        if (text.contains("同调记录")) {
+            state |= SEMANTIC_ANCHOR_RECORDS;
+        }
+        if (text.contains("好友申请")) {
+            state |= SEMANTIC_ANCHOR_REQUESTS;
+        }
+        if (text.contains("设置状态")
+                || text.contains("好友状态")
+                || text.contains("同调记录归档")
+                || text.contains("调取档案")
+                || text.contains("INITIALIZING")) {
+            state |= SEMANTIC_BLOCKED;
+        }
+        return state;
     }
 
     private Button createOverlayButton(Activity activity, String tag, String text,
@@ -473,7 +665,7 @@ public final class NeuralCoherenceModule extends XposedModule {
         int httpStatus = connection.getResponseCode();
         InputStream stream = httpStatus >= 200 && httpStatus < 300
                 ? connection.getInputStream() : connection.getErrorStream();
-        String responseText = stream == null ? "" : new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        String responseText = stream == null ? "" : readUtf8(stream);
         if (stream != null) {
             stream.close();
         }
@@ -506,10 +698,20 @@ public final class NeuralCoherenceModule extends XposedModule {
             throw httpStatusError(status);
         }
         try (InputStream input = connection.getInputStream()) {
-            return new JSONObject(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            return new JSONObject(readUtf8(input));
         } finally {
             connection.disconnect();
         }
+    }
+
+    private static String readUtf8(InputStream input) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+            output.write(buffer, 0, count);
+        }
+        return output.toString(StandardCharsets.UTF_8.name());
     }
 
     private void applyAuthHeaders(HttpURLConnection connection, String session) throws Exception {

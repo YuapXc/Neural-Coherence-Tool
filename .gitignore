@@ -10,3 +10,4 @@ signing.properties
 *.log
 captures/
 reverse-output/
+/dist/

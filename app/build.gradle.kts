@@ -25,8 +25,8 @@ android {
         applicationId = "io.github.neuralcoherence.probe"
         minSdk = 29
         targetSdk = 35
-        versionCode = 100
-        versionName = "1.0.0"
+        versionCode = 110
+        versionName = "1.1.0"
         buildConfigField("String", "SYNC_SIGNING_SALT", "\"${syncSigningSalt.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
 
     }
