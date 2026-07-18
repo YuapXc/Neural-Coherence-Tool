@@ -28,6 +28,14 @@
 - 弹窗、子页面、双击、滑动和系统手势不会被误判为主页。
 - Activity 重建后恢复当前任务状态和进度。
 
+### 实时进度通知
+
+- 扫描和批量互动期间显示当前进度；批量互动通知可直接停止任务。
+- Android 16 支持系统原生 `Notification.ProgressStyle` 和提升式实时更新；Android 14 至 15 使用普通进度通知。
+- 任务结束时先在实时更新中显示“已完成”和聚合结果 1 分钟，随后转换为可清除的详细完成通知。
+- 通知只展示好友总数、完成数和成功数，不包含好友姓名、ID、账号或会话信息。
+- 目标应用未声明通知权限，因此实时更新由模块自身发布；首次使用需允许模块通知权限。
+
 ### 可靠性保护
 
 - 批量任务启动后的 10 分钟内阻止再次批量执行，扫描功能不受影响。
@@ -46,6 +54,10 @@
 已验证环境：同调计划 2.0.2、Android 16 / ColorOS 16、LSPosed 2.0.2-it（API 102）。
 目标应用版本仅表示已完成测试的环境，并非硬编码版本白名单；目标应用更新后仍建议先执行只读扫描验证兼容性。
 
+实时通知的提升样式目前主要针对 Android 16 / ColorOS 16 完成验证。HyperOS 等其他国内定制系统
+可能存在进度条、状态胶囊或完成态刷新等显示细节差异；这不影响应用内面板、好友扫描和互动逻辑，
+后续版本将继续补充不同系统的显示适配。
+
 模块通过 Flutter Activity 注入面板，并通过目标应用现有登录会话访问其接口。若目标应用修改
 接口路径、鉴权方式、字段名称或底部导航结构，模块会停止相关操作或需要重新适配。
 
@@ -58,7 +70,16 @@
 |   `-- src/main/
 |       |-- AndroidManifest.xml          # Android 应用清单
 |       |-- java/io/github/neuralcoherence/probe/
-|       |   `-- NeuralCoherenceModule.java # libxposed 入口、面板、扫描与互动逻辑
+|       |   |-- NeuralCoherenceModule.java # libxposed 入口、面板、扫描与互动逻辑
+|       |   |-- LiveUpdateClient.java      # 宿主进程通知桥接
+|       |   |-- LiveUpdateContract.java    # 进程间动作与字段约定
+|       |   |-- LiveUpdateNotification.java # 原生实时更新通知
+|       |   |-- LiveUpdateReceiver.java    # 模块端进度接收器
+|       |   |-- LiveUpdateStopReceiver.java # 通知停止操作
+|       |   |-- LiveUpdateTransition.java  # 完成态定时转换与兜底
+|       |   |-- LiveUpdateTransitionReceiver.java # 内部定时转换接收器
+|       |   `-- NotificationPermissionActivity.java # 通知设置与自检
+|       |-- res/drawable/                # 通知图标
 |       |-- res/values/strings.xml       # 模块名称和说明
 |       `-- resources/META-INF/xposed/
 |           |-- java_init.list           # libxposed Java 入口
@@ -115,6 +136,17 @@ app/build/outputs/apk/debug/app-debug.apk
 签名后的 APK 输出到 `app/build/outputs/apk/release/app-release.apk`。
 
 安装后在 LSPosed 中启用模块，将作用域设置为目标应用，再强制停止并重新打开目标应用。
+
+### 实时通知配置
+
+1. 长按面板状态文字，或在“一键互动”确认框中点击“实时通知”。
+2. 允许 `Neural Coherence Tool` 发送通知；Android 16 可继续允许“实时更新提升”。
+3. 使用带后台管控的定制系统时，请允许 `Neural Coherence Tool` 自启动和后台运行。
+4. 若使用 Freezer、Thanox 或其他冻结/后台管控工具，请将包名
+   `io.github.neuralcoherence.probe` 加入后台启动与永不冻结白名单。
+
+若通知进度中途停止而应用内任务已经完成，通常是模块进程被系统或第三方工具冻结。确认以上
+白名单后，结束模块的旧进程并重新运行一次只读扫描即可，无需重启手机。
 
 ## 安全说明
 

@@ -1,8 +1,12 @@
 package io.github.neuralcoherence.probe;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.net.ConnectivityManager;
@@ -10,6 +14,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -60,6 +65,7 @@ public final class NeuralCoherenceModule extends XposedModule {
     private static final String SIGNING_SALT = BuildConfig.SYNC_SIGNING_SALT;
     private static final String MODULE_STATE_PREFS = "syncproject_module_state";
     private static final String LAST_BATCH_STARTED_AT = "last_batch_started_at";
+    private static final String LIVE_UPDATE_SETUP_SEEN = "live_update_setup_seen";
     private static final long REPEAT_GUARD_MS = 10 * 60 * 1000L;
     private static final int PAGE_SIZE = 50;
     private static final long MIN_ACTION_DELAY_MS = 500L;
@@ -101,6 +107,7 @@ public final class NeuralCoherenceModule extends XposedModule {
     private Field semanticsHintField;
     private Field semanticsTooltipField;
     private Field semanticsIdentifierField;
+    private boolean liveUpdateStopReceiverRegistered;
 
     @Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
@@ -109,6 +116,7 @@ public final class NeuralCoherenceModule extends XposedModule {
         }
 
         log(Log.INFO, TAG, "Loaded in " + param.getPackageName()
+                + ", module=" + BuildConfig.VERSION_NAME
                 + ", framework=" + getFrameworkName()
                 + ", api=" + getApiVersion());
 
@@ -154,6 +162,7 @@ public final class NeuralCoherenceModule extends XposedModule {
     }
 
     private void installScanButton(Activity activity) {
+        registerLiveUpdateStopReceiver(activity.getApplicationContext());
         FrameLayout content = activity.findViewById(android.R.id.content);
         if (content == null || content.findViewWithTag(PANEL_TAG) != null) {
             return;
@@ -171,6 +180,7 @@ public final class NeuralCoherenceModule extends XposedModule {
         content.addView(panel.root, params);
         panel.setRunning(interactionRunning.get());
         panel.setStatus(savedStatus, savedProgress, savedMaximum);
+        panel.status.setOnLongClickListener(view -> LiveUpdateClient.openSettings(activity));
         panel.scan.setOnClickListener(view -> startDryRunScan(activity, panel));
         panel.action.setOnClickListener(view -> {
             if (interactionRunning.get()) {
@@ -180,6 +190,37 @@ public final class NeuralCoherenceModule extends XposedModule {
                 confirmBatchInteraction(activity, panel);
             }
         });
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private synchronized void registerLiveUpdateStopReceiver(Context context) {
+        if (liveUpdateStopReceiverRegistered) {
+            return;
+        }
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context receiverContext, Intent intent) {
+                if (!LiveUpdateContract.ACTION_STOP_TARGET.equals(intent.getAction())
+                        || !LiveUpdateClient.isTrustedModuleSender(this)) {
+                    return;
+                }
+                if (interactionRunning.get()) {
+                    stopRequested.set(true);
+                    updatePanel(true, "停止中", savedProgress, savedMaximum);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(LiveUpdateContract.ACTION_STOP_TARGET);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                context.registerReceiver(receiver, filter);
+            }
+            liveUpdateStopReceiverRegistered = true;
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "Unable to register live update stop receiver", error);
+        }
     }
 
     private void startSemanticMonitor(Activity activity) {
@@ -433,8 +474,9 @@ public final class NeuralCoherenceModule extends XposedModule {
     }
 
     private void confirmBatchInteraction(Activity activity, ControlPanel panel) {
-        long lastCompleted = activity.getSharedPreferences(MODULE_STATE_PREFS, Context.MODE_PRIVATE)
-                .getLong(LAST_BATCH_STARTED_AT, 0L);
+        SharedPreferences state = activity.getSharedPreferences(
+                MODULE_STATE_PREFS, Context.MODE_PRIVATE);
+        long lastCompleted = state.getLong(LAST_BATCH_STARTED_AT, 0L);
         long remaining = REPEAT_GUARD_MS - (System.currentTimeMillis() - lastCompleted);
         if (remaining > 0) {
             long minutes = Math.max(1, (remaining + 59999L) / 60000L);
@@ -446,12 +488,19 @@ public final class NeuralCoherenceModule extends XposedModule {
                     .show();
             return;
         }
+        if (!state.getBoolean(LIVE_UPDATE_SETUP_SEEN, false)
+                && LiveUpdateClient.openSettings(activity)) {
+            state.edit().putBoolean(LIVE_UPDATE_SETUP_SEEN, true).apply();
+            return;
+        }
         new AlertDialog.Builder(activity)
                 .setTitle("一键互动")
                 .setMessage("将重新扫描好友，并依次向所有尚未完成今日互动的好友发送请求。\n\n"
                         + "无色发送 ping，绿色发送 pong；蓝色和橙色跳过。"
                         + "每次间隔 0.5 至 1 秒，运行中可手动停止，操作不可撤销。")
                 .setNegativeButton("取消", null)
+                .setNeutralButton("实时通知", (dialog, which) ->
+                        LiveUpdateClient.openSettings(activity))
                 .setPositiveButton("确认执行", (dialog, which) -> startBatchInteraction(activity, panel))
                 .show();
     }
@@ -464,6 +513,7 @@ public final class NeuralCoherenceModule extends XposedModule {
         activity.getSharedPreferences(MODULE_STATE_PREFS, Context.MODE_PRIVATE).edit()
                 .putLong(LAST_BATCH_STARTED_AT, System.currentTimeMillis()).apply();
         updatePanel(true, "扫描中", 0, 0);
+        LiveUpdateClient.update(activity, "扫描好友", 0, 0, 0, true);
         NETWORK_EXECUTOR.execute(() -> {
             InteractionResult interaction = new InteractionResult();
             try {
@@ -472,8 +522,11 @@ public final class NeuralCoherenceModule extends XposedModule {
                         throw new StopRequestedException();
                     }
                     updatePanel(true, "扫描 " + page + "/" + pages, page, pages);
+                    LiveUpdateClient.update(activity, "扫描好友", page, pages, 0, false);
                 });
                 int count = scan.candidates.size();
+                interaction.eligible = count;
+                LiveUpdateClient.update(activity, "互动好友", 0, count, 0, true);
                 for (int i = 0; i < count; i++) {
                     if (stopRequested.get()) {
                         throw new StopRequestedException();
@@ -487,13 +540,14 @@ public final class NeuralCoherenceModule extends XposedModule {
                     } else {
                         interaction.pong++;
                     }
+                    LiveUpdateClient.update(activity, "互动好友", current, count,
+                            interaction.ping + interaction.pong, false);
                     if (current < count) {
                         long delay = ThreadLocalRandom.current().nextLong(
                                 MIN_ACTION_DELAY_MS, MAX_ACTION_DELAY_MS + 1);
                         Thread.sleep(delay);
                     }
                 }
-                interaction.eligible = scan.candidates.size();
                 showInteractionResult(activity, panel, interaction, null);
             } catch (StopRequestedException stopped) {
                 interaction.stopped = true;
@@ -510,14 +564,49 @@ public final class NeuralCoherenceModule extends XposedModule {
 
     private void showInteractionResult(Activity activity, ControlPanel panel,
                                        InteractionResult result, Throwable error) {
-        updatePanel(false, result.stopped ? "已停止" : "已完成",
-                result.ping + result.pong, Math.max(result.eligible, result.ping + result.pong));
+        int sent = result.ping + result.pong;
+        int total = Math.max(result.eligible, sent);
+        updatePanel(false, result.stopped ? "已停止" : "已完成", sent, total);
+        String notificationTitle;
+        String notificationSummary;
+        String completionLabel;
+        if (error != null) {
+            notificationTitle = "互动因错误停止";
+            notificationSummary = "成功 " + sent + "/" + total
+                    + " · ping " + result.ping + " · pong " + result.pong;
+            completionLabel = "已停止";
+        } else if (result.stopped) {
+            notificationTitle = "互动已手动停止";
+            notificationSummary = "成功 " + sent + "/" + total
+                    + " · ping " + result.ping + " · pong " + result.pong;
+            completionLabel = "已停止";
+        } else {
+            notificationTitle = "同调互动已完成";
+            notificationSummary = total == 0 ? "今天无需互动 · ping 0 · pong 0"
+                    : "成功 " + sent + "/" + total
+                    + " · ping " + result.ping + " · pong " + result.pong;
+            completionLabel = "已完成";
+        }
+        String notificationDetails = "成功发送：" + sent
+                + "\nping：" + result.ping
+                + "\npong：" + result.pong;
+        if (error != null) {
+            notificationDetails += "\n\n任务因错误停止，请返回应用查看详情。";
+        } else if (result.stopped) {
+            notificationDetails += "\n\n任务已按你的要求停止。";
+        } else if (total == 0) {
+            notificationDetails += "\n\n今天没有需要互动的好友。";
+        } else {
+            notificationDetails += "\n\n所有待互动好友均已处理。";
+        }
+        LiveUpdateClient.finish(activity, notificationTitle, notificationSummary,
+                notificationDetails, sent, total, completionLabel);
         Activity visibleActivity = currentActivity.get();
         if (visibleActivity == null || visibleActivity.isFinishing() || visibleActivity.isDestroyed()) {
             return;
         }
         visibleActivity.runOnUiThread(() -> {
-            String message = "成功发送：" + (result.ping + result.pong)
+            String message = "成功发送：" + sent
                     + "\n其中 ping：" + result.ping
                     + "\n其中 pong：" + result.pong;
             if (error != null) {
@@ -541,14 +630,33 @@ public final class NeuralCoherenceModule extends XposedModule {
     private void startDryRunScan(Activity activity, ControlPanel panel) {
         panel.scan.setEnabled(false);
         panel.setStatus("准备扫描", 0, 0);
+        LiveUpdateClient.update(activity, "扫描好友", 0, 0, 0, true, false);
         NETWORK_EXECUTOR.execute(() -> {
             try {
-                ScanResult result = scanAllFriends(activity, (page, pages) ->
+                ScanResult result = scanAllFriends(activity, (page, pages) -> {
+                    LiveUpdateClient.update(activity, "扫描好友", page, pages,
+                            0, false, false);
                         activity.runOnUiThread(() -> panel.setStatus(
-                                "扫描 " + page + "/" + pages, page, pages)));
+                                "扫描 " + page + "/" + pages, page, pages));
+                });
+                int pending = result.none + result.received;
+                String notificationSummary = "共 " + result.total
+                        + " · 无 " + result.none
+                        + " · 蓝 " + result.sent
+                        + " · 绿 " + result.received
+                        + " · 橙 " + result.mutual;
+                String notificationDetails = "好友总数：" + result.total
+                        + "\n待互动：" + pending
+                        + "\n无色：" + result.none
+                        + "\n蓝色：" + result.sent
+                        + "\n绿色：" + result.received
+                        + "\n橙色：" + result.mutual
+                        + "\n\n本次仅扫描，没有发送互动。";
+                LiveUpdateClient.finish(activity, "好友扫描已完成",
+                        notificationSummary, notificationDetails,
+                        result.total, result.total, "已完成");
                 activity.runOnUiThread(() -> {
                     panel.scan.setEnabled(true);
-                    int pending = result.none + result.received;
                     panel.setStatus("待互动 " + pending, 0, pending);
                     new AlertDialog.Builder(activity)
                             .setTitle("扫描完成")
@@ -563,6 +671,10 @@ public final class NeuralCoherenceModule extends XposedModule {
                 });
             } catch (Throwable error) {
                 log(Log.ERROR, TAG, "Friend scan failed: " + error.getClass().getSimpleName());
+                LiveUpdateClient.finish(activity, "好友扫描因错误停止",
+                        "扫描未完成，请返回应用查看详情",
+                        "好友扫描因错误停止。\n\n请返回应用查看错误详情。",
+                        0, 0, "已停止");
                 activity.runOnUiThread(() -> {
                     panel.scan.setEnabled(true);
                     panel.setStatus("扫描失败", 0, 0);

@@ -1,10 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+
     <application
         android:allowBackup="false"
         android:description="@string/module_description"
         android:hasCode="true"
         android:label="@string/app_name"
-        android:supportsRtl="true" />
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".NotificationPermissionActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+
+        <receiver
+            android:name=".LiveUpdateReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.neuralcoherence.probe.action.UPDATE_LIVE_STATUS" />
+                <action android:name="io.github.neuralcoherence.probe.action.FINISH_LIVE_STATUS" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".LiveUpdateStopReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".LiveUpdateTransitionReceiver"
+            android:exported="false" />
+    </application>
 </manifest>
