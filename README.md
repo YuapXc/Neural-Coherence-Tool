@@ -175,3 +175,15 @@ app/build/outputs/apk/debug/app-debug.apk
 - 好友 ID 只用于当前请求，不写入磁盘。
 - 接口结构不符合预期时采用失败关闭策略，不猜测字段含义。
 - 发布前应再次运行敏感信息扫描，并使用独立 release 签名构建 APK。
+
+## 致谢
+
+感谢以下开源项目及其维护者为本项目提供的 API、Hook 框架与无 Root 运行方案：
+
+- [libxposed](https://github.com/libxposed)：提供现代 Xposed API 及相关接口定义。
+- [LSPosed](https://github.com/LSPosed/LSPosed)：提供 Root 环境下的 Xposed 模块运行框架与生态基础。
+- [LSPatch](https://github.com/LSPosed/LSPatch)：为免 Root APK 注入与模块加载方案提供了重要基础。
+- [NPatch](https://github.com/7723mod/NPatch)：提供支持 libxposed API 102 的无 Root 运行和宿主打包方案。
+
+「同调计划」及相关名称、图标和应用内容归其原开发者所有。本项目是独立的第三方开源工具，
+与「同调计划」官方不存在隶属、授权或合作关系。
