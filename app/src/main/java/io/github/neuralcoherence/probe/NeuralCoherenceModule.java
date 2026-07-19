@@ -13,6 +13,7 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Handler;
@@ -79,6 +80,11 @@ public final class NeuralCoherenceModule extends XposedModule {
     private static final int SEMANTIC_BLOCKED = 1 << 3;
     private static final int SEMANTIC_MAIN_ANCHORS = SEMANTIC_ANCHOR_NETWORK
             | SEMANTIC_ANCHOR_RECORDS | SEMANTIC_ANCHOR_REQUESTS;
+    private static final int PANEL_DESIRED_WIDTH_DP = 128;
+    private static final int PANEL_MIN_WIDTH_DP = 112;
+    private static final int PANEL_HEIGHT_DP = 44;
+    private static final int PANEL_ANCHOR_PADDING_DP = 4;
+    private static final long PANEL_ANCHOR_GRACE_MS = 3000L;
     private static final ExecutorService NETWORK_EXECUTOR = Executors.newSingleThreadExecutor();
     private static final AtomicBoolean interactionRunning = new AtomicBoolean(false);
     private static final AtomicBoolean stopRequested = new AtomicBoolean(false);
@@ -97,6 +103,9 @@ public final class NeuralCoherenceModule extends XposedModule {
     private long semanticTouchDownAt;
     private boolean semanticTouchMoved;
     private boolean semanticAccessFailureLogged;
+    private boolean semanticAnchorFailureLogged;
+    private PanelAnchor lastPanelAnchor;
+    private long lastPanelAnchorAt;
     private WeakReference<View> cachedFlutterView = new WeakReference<>(null);
     private WeakReference<Object> cachedAccessibilityBridge = new WeakReference<>(null);
     private Field accessibilityBridgeField;
@@ -107,6 +116,8 @@ public final class NeuralCoherenceModule extends XposedModule {
     private Field semanticsHintField;
     private Field semanticsTooltipField;
     private Field semanticsIdentifierField;
+    private Field semanticsParentField;
+    private Method semanticsGlobalRectMethod;
     private boolean liveUpdateStopReceiverRegistered;
 
     @Override
@@ -173,10 +184,9 @@ public final class NeuralCoherenceModule extends XposedModule {
         currentPanel = new WeakReference<>(panel);
         panel.root.setTag(PANEL_TAG);
         panel.root.setVisibility(View.GONE);
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(activity, 128), dp(activity, 44));
-        params.gravity = Gravity.TOP | Gravity.END;
-        params.topMargin = dp(activity, 126);
-        params.rightMargin = dp(activity, 122);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                dp(activity, PANEL_DESIRED_WIDTH_DP), dp(activity, PANEL_HEIGHT_DP));
+        params.gravity = Gravity.TOP | Gravity.START;
         content.addView(panel.root, params);
         panel.setRunning(interactionRunning.get());
         panel.setStatus(savedStatus, savedProgress, savedMaximum);
@@ -228,6 +238,9 @@ public final class NeuralCoherenceModule extends XposedModule {
         semanticTapGeneration++;
         lastSemanticVisibility = null;
         lastSemanticCheckAt = 0L;
+        lastPanelAnchor = null;
+        lastPanelAnchorAt = 0L;
+        semanticAnchorFailureLogged = false;
         cachedFlutterView = new WeakReference<>(null);
         cachedAccessibilityBridge = new WeakReference<>(null);
         runSemanticMonitor(activity, generation);
@@ -293,12 +306,37 @@ public final class NeuralCoherenceModule extends XposedModule {
 
     private void updatePanelVisibilityFromSemantics(Activity activity) {
         lastSemanticCheckAt = SystemClock.uptimeMillis();
-        boolean visible = isSyncNetworkMainPage(activity);
-        View content = activity.findViewById(android.R.id.content);
+        SemanticPageResult result = inspectSyncNetworkMainPage(activity);
+        boolean visible = result.mainPage;
+        FrameLayout content = activity.findViewById(android.R.id.content);
         if (content == null) {
             return;
         }
         View panel = content.findViewWithTag(PANEL_TAG);
+        if (visible && panel != null) {
+            PanelAnchor anchor = result.anchor;
+            if (anchor == null && SystemClock.uptimeMillis() - lastPanelAnchorAt
+                    <= PANEL_ANCHOR_GRACE_MS) {
+                anchor = lastPanelAnchor;
+            }
+            if (anchor == null || !layoutPanelBetweenAnchors(
+                    activity, content, panel, result.flutterView, anchor)) {
+                visible = false;
+                if (!semanticAnchorFailureLogged) {
+                    semanticAnchorFailureLogged = true;
+                    log(Log.WARN, TAG, "Semantic title geometry unavailable");
+                }
+            } else {
+                if (result.anchor != null) {
+                    lastPanelAnchor = result.anchor;
+                    lastPanelAnchorAt = SystemClock.uptimeMillis();
+                }
+                semanticAnchorFailureLogged = false;
+            }
+        } else if (!visible) {
+            lastPanelAnchor = null;
+            lastPanelAnchorAt = 0L;
+        }
         int targetVisibility = visible ? View.VISIBLE : View.GONE;
         if (panel != null && panel.getVisibility() != targetVisibility) {
             panel.setVisibility(targetVisibility);
@@ -309,49 +347,193 @@ public final class NeuralCoherenceModule extends XposedModule {
         }
     }
 
-    private boolean isSyncNetworkMainPage(Activity activity) {
+    private SemanticPageResult inspectSyncNetworkMainPage(Activity activity) {
         try {
             View flutterView = getFlutterView(activity);
             if (flutterView == null) {
-                return false;
+                return SemanticPageResult.hidden();
             }
 
             Object bridge = getAccessibilityBridge(flutterView);
             if (bridge == null) {
-                return false;
+                return SemanticPageResult.hidden();
             }
 
             Object treeValue = semanticsTreeField.get(bridge);
             if (!(treeValue instanceof Map)) {
-                return false;
+                return SemanticPageResult.hidden();
             }
             Map<?, ?> semanticsTree = (Map<?, ?>) treeValue;
             int state = 0;
             int visited = 0;
+            List<SemanticAnchor> networkTitles = new ArrayList<>();
+            List<SemanticAnchor> settingsEntries = new ArrayList<>();
             for (Object node : semanticsTree.values()) {
                 if (node == null || visited++ >= 2000) {
                     continue;
                 }
                 ensureSemanticsNodeFields(node.getClass());
-                state = inspectSemanticText(state, semanticsLabelField.get(node));
-                state = inspectSemanticText(state, semanticsValueField.get(node));
-                state = inspectSemanticText(state, semanticsHintField.get(node));
-                state = inspectSemanticText(state, semanticsTooltipField.get(node));
-                state = inspectSemanticText(state, semanticsIdentifierField.get(node));
-                if ((state & SEMANTIC_BLOCKED) != 0) {
-                    return false;
+                Object label = semanticsLabelField.get(node);
+                Object value = semanticsValueField.get(node);
+                Object hint = semanticsHintField.get(node);
+                Object tooltip = semanticsTooltipField.get(node);
+                Object identifier = semanticsIdentifierField.get(node);
+                state = inspectSemanticText(state, label);
+                state = inspectSemanticText(state, value);
+                state = inspectSemanticText(state, hint);
+                state = inspectSemanticText(state, tooltip);
+                state = inspectSemanticText(state, identifier);
+
+                boolean networkTitle = semanticTextContains(label, "同调网络")
+                        || semanticTextContains(value, "同调网络")
+                        || semanticTextContains(hint, "同调网络")
+                        || semanticTextContains(tooltip, "同调网络")
+                        || semanticTextContains(identifier, "同调网络");
+                boolean settingsEntry = semanticTextContains(label, "设置特别通讯")
+                        || semanticTextContains(value, "设置特别通讯")
+                        || semanticTextContains(hint, "设置特别通讯")
+                        || semanticTextContains(tooltip, "设置特别通讯")
+                        || semanticTextContains(identifier, "设置特别通讯");
+                if (networkTitle || settingsEntry) {
+                    Rect bounds = getSemanticBounds(node);
+                    if (bounds != null && !bounds.isEmpty()) {
+                        SemanticAnchor candidate = new SemanticAnchor(node, bounds);
+                        if (networkTitle) {
+                            networkTitles.add(candidate);
+                        }
+                        if (settingsEntry) {
+                            settingsEntries.add(candidate);
+                        }
+                    }
                 }
             }
             semanticAccessFailureLogged = false;
-            return (state & SEMANTIC_MAIN_ANCHORS) == SEMANTIC_MAIN_ANCHORS;
+            boolean mainPage = (state & SEMANTIC_BLOCKED) == 0
+                    && (state & SEMANTIC_MAIN_ANCHORS) == SEMANTIC_MAIN_ANCHORS;
+            if (!mainPage) {
+                return SemanticPageResult.hidden();
+            }
+            PanelAnchor anchor = selectPanelAnchor(networkTitles, settingsEntries);
+            return new SemanticPageResult(true, flutterView, anchor);
         } catch (Throwable error) {
             if (!semanticAccessFailureLogged) {
                 semanticAccessFailureLogged = true;
                 log(Log.WARN, TAG, "Flutter semantics unavailable: "
                         + error.getClass().getSimpleName());
             }
+            return SemanticPageResult.hidden();
+        }
+    }
+
+    private PanelAnchor selectPanelAnchor(List<SemanticAnchor> networkTitles,
+                                          List<SemanticAnchor> settingsEntries)
+            throws ReflectiveOperationException {
+        SemanticAnchor bestNetwork = null;
+        SemanticAnchor bestSettings = null;
+        int bestOverlap = Integer.MIN_VALUE;
+        int bestCenterDistance = Integer.MAX_VALUE;
+        for (SemanticAnchor network : networkTitles) {
+            for (SemanticAnchor settings : settingsEntries) {
+                if (settings.bounds.left <= network.bounds.right) {
+                    continue;
+                }
+                int overlap = Math.min(network.bounds.bottom, settings.bounds.bottom)
+                        - Math.max(network.bounds.top, settings.bounds.top);
+                int centerDistance = Math.abs(network.bounds.centerY()
+                        - settings.bounds.centerY());
+                int rowTolerance = Math.max(network.bounds.height(), settings.bounds.height());
+                if (overlap <= 0 && centerDistance > rowTolerance) {
+                    continue;
+                }
+                if (overlap > bestOverlap
+                        || overlap == bestOverlap && centerDistance < bestCenterDistance) {
+                    bestNetwork = network;
+                    bestSettings = settings;
+                    bestOverlap = overlap;
+                    bestCenterDistance = centerDistance;
+                }
+            }
+        }
+        if (bestNetwork == null || bestSettings == null) {
+            return null;
+        }
+        Rect settingsEntryBounds = expandToSettingsEntryBounds(
+                bestSettings, bestNetwork.bounds);
+        return new PanelAnchor(bestNetwork.bounds, settingsEntryBounds);
+    }
+
+    private Rect expandToSettingsEntryBounds(SemanticAnchor settings,
+                                             Rect networkBounds)
+            throws ReflectiveOperationException {
+        Rect best = new Rect(settings.bounds);
+        Object parent = semanticsParentField.get(settings.node);
+        for (int depth = 0; parent != null && depth < 4; depth++) {
+            Rect parentBounds = getSemanticBounds(parent);
+            if (parentBounds == null || parentBounds.isEmpty()
+                    || !parentBounds.contains(settings.bounds)
+                    || parentBounds.left <= networkBounds.right) {
+                break;
+            }
+            int maxWidth = Math.max(1, settings.bounds.width()) * 3;
+            int maxHeight = Math.max(1, settings.bounds.height()) * 3;
+            if (parentBounds.width() > maxWidth || parentBounds.height() > maxHeight) {
+                break;
+            }
+            best = parentBounds;
+            parent = semanticsParentField.get(parent);
+        }
+        return best;
+    }
+
+    private Rect getSemanticBounds(Object node) throws ReflectiveOperationException {
+        Object value = semanticsGlobalRectMethod.invoke(node);
+        return value instanceof Rect ? new Rect((Rect) value) : null;
+    }
+
+    private boolean layoutPanelBetweenAnchors(Activity activity, FrameLayout content,
+                                              View panel, View flutterView,
+                                              PanelAnchor anchor) {
+        if (flutterView == null || content.getWidth() <= 0 || content.getHeight() <= 0) {
             return false;
         }
+        int padding = dp(activity, PANEL_ANCHOR_PADDING_DP);
+        int availableWidth = anchor.settingsEntry.left - anchor.networkTitle.right
+                - padding * 2;
+        int minimumWidth = dp(activity, PANEL_MIN_WIDTH_DP);
+        if (availableWidth < minimumWidth) {
+            return false;
+        }
+        int panelWidth = Math.min(dp(activity, PANEL_DESIRED_WIDTH_DP), availableWidth);
+        int panelHeight = dp(activity, PANEL_HEIGHT_DP);
+        int localLeft = anchor.networkTitle.right + padding
+                + (availableWidth - panelWidth) / 2;
+        int localCenterY = (anchor.networkTitle.centerY()
+                + anchor.settingsEntry.centerY()) / 2;
+        int localTop = localCenterY - panelHeight / 2;
+
+        int[] flutterLocation = new int[2];
+        int[] contentLocation = new int[2];
+        flutterView.getLocationOnScreen(flutterLocation);
+        content.getLocationOnScreen(contentLocation);
+        int left = flutterLocation[0] - contentLocation[0] + localLeft;
+        int top = flutterLocation[1] - contentLocation[1] + localTop;
+        left = Math.max(0, Math.min(left, content.getWidth() - panelWidth));
+        top = Math.max(0, Math.min(top, content.getHeight() - panelHeight));
+
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) panel.getLayoutParams();
+        if (params.width == panelWidth && params.height == panelHeight
+                && params.leftMargin == left && params.topMargin == top
+                && params.gravity == (Gravity.TOP | Gravity.START)) {
+            return true;
+        }
+        params.width = panelWidth;
+        params.height = panelHeight;
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.leftMargin = left;
+        params.topMargin = top;
+        params.rightMargin = 0;
+        panel.setLayoutParams(params);
+        return true;
     }
 
     private View getFlutterView(Activity activity) {
@@ -397,6 +579,8 @@ public final class NeuralCoherenceModule extends XposedModule {
         semanticsHintField = findField(nodeClass, "hint");
         semanticsTooltipField = findField(nodeClass, "tooltip");
         semanticsIdentifierField = findField(nodeClass, "identifier");
+        semanticsParentField = findField(nodeClass, "parent");
+        semanticsGlobalRectMethod = findMethod(nodeClass, "getGlobalRect");
         cachedSemanticsNodeClass = nodeClass;
     }
 
@@ -428,6 +612,24 @@ public final class NeuralCoherenceModule extends XposedModule {
             }
         }
         throw new NoSuchFieldException(name);
+    }
+
+    private static Method findMethod(Class<?> type, String name)
+            throws ReflectiveOperationException {
+        while (type != null) {
+            try {
+                Method method = type.getDeclaredMethod(name);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(name);
+    }
+
+    private static boolean semanticTextContains(Object value, String expected) {
+        return value instanceof CharSequence && value.toString().contains(expected);
     }
 
     private static int inspectSemanticText(int state, Object value) {
@@ -905,6 +1107,42 @@ public final class NeuralCoherenceModule extends XposedModule {
 
     private interface ProgressListener {
         void onProgress(int page, int pages);
+    }
+
+    private static final class SemanticAnchor {
+        final Object node;
+        final Rect bounds;
+
+        SemanticAnchor(Object node, Rect bounds) {
+            this.node = node;
+            this.bounds = new Rect(bounds);
+        }
+    }
+
+    private static final class PanelAnchor {
+        final Rect networkTitle;
+        final Rect settingsEntry;
+
+        PanelAnchor(Rect networkTitle, Rect settingsEntry) {
+            this.networkTitle = new Rect(networkTitle);
+            this.settingsEntry = new Rect(settingsEntry);
+        }
+    }
+
+    private static final class SemanticPageResult {
+        final boolean mainPage;
+        final View flutterView;
+        final PanelAnchor anchor;
+
+        SemanticPageResult(boolean mainPage, View flutterView, PanelAnchor anchor) {
+            this.mainPage = mainPage;
+            this.flutterView = flutterView;
+            this.anchor = anchor;
+        }
+
+        static SemanticPageResult hidden() {
+            return new SemanticPageResult(false, null, null);
+        }
     }
 
     private static final class ScanResult {

@@ -3,6 +3,19 @@
 基于 [libxposed API 102](https://libxposed.github.io/api/index.html) 的 LSPosed 模块，
 为方舟雷达的官方 APP [同调计划](https://www.tongdiaojihua.com/) 提供顺序互动。
 
+## 无 Root 使用
+
+> [!IMPORTANT]
+> 本模块已经验证可通过 **NPatch** 在无 Root 设备上运行。该方式需要重新打包「同调计划」
+> 宿主 APK，并使用 **Stealth** 绕过签名校验。
+>
+> 重新打包后的应用签名与官方版本不同，因此无法直接覆盖安装。请先卸载官方版本，并提前
+> 确认账号和登录方式。
+
+[查看完整的无 Root 安装教程](docs/ROOTLESS_GUIDE.md)
+
+若设备已经 Root，也可以继续使用 LSPosed 2.x / libxposed API 102，无需重新打包宿主。
+
 ## 功能
 
 ### 好友状态扫描
@@ -22,7 +35,8 @@
 
 ### 页面面板
 
-- 控制面板显示在「同调网络」标题区域。
+- 控制面板根据 Flutter 语义节点的实际位置，自适应显示在「同调网络」与「设置特别通讯」之间。
+- 面板会避让「设置特别通讯」左侧图标，并根据标题间的可用空间自动调整宽度。
 - 提供扫描、互动、停止和实时进度显示。
 - 通过 Flutter 语义树识别真实页面，仅在「同调网络」主页显示。
 - 弹窗、子页面、双击、滑动和系统手势不会被误判为主页。
@@ -47,11 +61,14 @@
 ## 兼容性
 
 - LSPosed/libxposed API：102
+- 无 Root 框架：支持 libxposed API 102 的 NPatch 最新测试版
 - Android：最低 API 29
 - 架构：模块本身不包含 native 库
 - 作用域：`com.linktech.arkradar`
 
 已验证环境：同调计划 2.0.2、Android 16 / ColorOS 16、LSPosed 2.0.2-it（API 102）。
+无 Root 环境已验证 NPatch 本地模式、Stealth 签名校验绕过，以及扫描、`ping`、`pong` 和通知链路；
+具体安装方式及签名变化带来的限制请参阅[无 Root 安装教程](docs/ROOTLESS_GUIDE.md)。
 目标应用版本仅表示已完成测试的环境，并非硬编码版本白名单；目标应用更新后仍建议先执行只读扫描验证兼容性。
 
 实时通知的提升样式目前主要针对 Android 16 / ColorOS 16 完成验证。HyperOS 等其他国内定制系统
@@ -85,6 +102,9 @@
 |           |-- java_init.list           # libxposed Java 入口
 |           |-- module.prop              # API 版本及模块属性
 |           `-- scope.list               # 默认目标作用域
+|-- docs/
+|   |-- ROOTLESS_GUIDE.md                # NPatch 无 Root 图文安装教程
+|   `-- images/                          # 教程图片
 |-- build.gradle.kts                     # Android Gradle Plugin 配置
 |-- gradle/wrapper/                      # Gradle 8.9 Wrapper
 |-- gradlew / gradlew.bat                # 跨平台构建入口
