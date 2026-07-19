@@ -9,6 +9,9 @@
 > 本模块已经验证可通过 **NPatch** 在无 Root 设备上运行。该方式需要重新打包「同调计划」
 > 宿主 APK，并使用 **Stealth** 绕过签名校验。
 >
+> **必须使用无 Root 教程中提供的 NPatch 测试版（已验证 `v1.0.6-723`）。**
+> 仅支持 libxposed API 101 的 NPatch 稳定版无法加载本模块。
+>
 > 重新打包后的应用签名与官方版本不同，因此无法直接覆盖安装。请先卸载官方版本，并提前
 > 确认账号和登录方式。
 
@@ -61,7 +64,7 @@
 ## 兼容性
 
 - LSPosed/libxposed API：102
-- 无 Root 框架：支持 libxposed API 102 的 NPatch 最新测试版
+- 无 Root 框架：NPatch 测试版 `v1.0.6-723`，或明确支持 libxposed API 102 的后续测试版
 - Android：最低 API 29
 - 架构：模块本身不包含 native 库
 - 作用域：`com.linktech.arkradar`

@@ -24,6 +24,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -108,8 +109,13 @@ public final class NeuralCoherenceModule extends XposedModule {
     private long lastPanelAnchorAt;
     private WeakReference<View> cachedFlutterView = new WeakReference<>(null);
     private WeakReference<Object> cachedAccessibilityBridge = new WeakReference<>(null);
+    private WeakReference<Object> forcedAccessibilityChannel = new WeakReference<>(null);
     private Field accessibilityBridgeField;
+    private Field accessibilityChannelField;
     private Field semanticsTreeField;
+    private Method enableFlutterSemanticsMethod;
+    private Method disableFlutterSemanticsMethod;
+    private boolean flutterSemanticsForced;
     private Class<?> cachedSemanticsNodeClass;
     private Field semanticsLabelField;
     private Field semanticsValueField;
@@ -152,6 +158,7 @@ public final class NeuralCoherenceModule extends XposedModule {
             Method onPause = activityClass.getDeclaredMethod("onPause");
             hook(onPause).setId(TAG + ":FlutterActivity#onPause").intercept(chain -> {
                 stopSemanticMonitor();
+                restoreFlutterSemantics((Activity) chain.getThisObject());
                 return chain.proceed();
             });
             Method dispatchTouchEvent = activityClass.getMethod("dispatchTouchEvent", MotionEvent.class);
@@ -243,6 +250,17 @@ public final class NeuralCoherenceModule extends XposedModule {
         semanticAnchorFailureLogged = false;
         cachedFlutterView = new WeakReference<>(null);
         cachedAccessibilityBridge = new WeakReference<>(null);
+        try {
+            View flutterView = getFlutterView(activity);
+            if (flutterView != null) {
+                Object bridge = getAccessibilityBridge(flutterView);
+                if (bridge != null) {
+                    enableFlutterSemanticsIfNeeded(activity, bridge);
+                }
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "Unable to enable Flutter semantics on resume", error);
+        }
         runSemanticMonitor(activity, generation);
     }
 
@@ -364,6 +382,10 @@ public final class NeuralCoherenceModule extends XposedModule {
                 return SemanticPageResult.hidden();
             }
             Map<?, ?> semanticsTree = (Map<?, ?>) treeValue;
+            if (semanticsTree.isEmpty()) {
+                enableFlutterSemanticsIfNeeded(activity, bridge);
+                return SemanticPageResult.hidden();
+            }
             int state = 0;
             int visited = 0;
             List<SemanticAnchor> networkTitles = new ArrayList<>();
@@ -423,6 +445,70 @@ public final class NeuralCoherenceModule extends XposedModule {
             }
             return SemanticPageResult.hidden();
         }
+    }
+
+    private void enableFlutterSemanticsIfNeeded(Activity activity, Object bridge)
+            throws ReflectiveOperationException {
+        AccessibilityManager manager = (AccessibilityManager) activity.getSystemService(
+                Context.ACCESSIBILITY_SERVICE);
+        if (manager == null || manager.isEnabled() || flutterSemanticsForced) {
+            return;
+        }
+        Object channel = getAccessibilityChannel(bridge);
+        if (channel == null) {
+            return;
+        }
+        enableFlutterSemanticsMethod.invoke(channel);
+        forcedAccessibilityChannel = new WeakReference<>(channel);
+        flutterSemanticsForced = true;
+        log(Log.INFO, TAG, "Enabled Flutter semantics while system accessibility is off");
+    }
+
+    private void restoreFlutterSemantics(Activity activity) {
+        if (!flutterSemanticsForced) {
+            return;
+        }
+        Object channel = forcedAccessibilityChannel.get();
+        AccessibilityManager manager = (AccessibilityManager) activity.getSystemService(
+                Context.ACCESSIBILITY_SERVICE);
+        if (manager != null && manager.isEnabled()) {
+            flutterSemanticsForced = false;
+            forcedAccessibilityChannel = new WeakReference<>(null);
+            return;
+        }
+        if (channel == null || disableFlutterSemanticsMethod == null) {
+            return;
+        }
+        try {
+            disableFlutterSemanticsMethod.invoke(channel);
+            flutterSemanticsForced = false;
+            forcedAccessibilityChannel = new WeakReference<>(null);
+            log(Log.INFO, TAG, "Restored Flutter semantics after leaving foreground");
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "Unable to restore Flutter semantics", error);
+        }
+    }
+
+    private Object getAccessibilityChannel(Object bridge)
+            throws ReflectiveOperationException {
+        if (accessibilityChannelField == null
+                || !accessibilityChannelField.getDeclaringClass().isAssignableFrom(
+                bridge.getClass())) {
+            accessibilityChannelField = findField(bridge.getClass(), "accessibilityChannel");
+        }
+        Object channel = accessibilityChannelField.get(bridge);
+        if (channel == null) {
+            return null;
+        }
+        if (enableFlutterSemanticsMethod == null
+                || !enableFlutterSemanticsMethod.getDeclaringClass().isAssignableFrom(
+                channel.getClass())) {
+            enableFlutterSemanticsMethod = findMethod(
+                    channel.getClass(), "onAndroidAccessibilityEnabled");
+            disableFlutterSemanticsMethod = findMethod(
+                    channel.getClass(), "onAndroidAccessibilityDisabled");
+        }
+        return channel;
     }
 
     private PanelAnchor selectPanelAnchor(List<SemanticAnchor> networkTitles,
