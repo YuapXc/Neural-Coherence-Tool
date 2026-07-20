@@ -1,7 +1,9 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.android")
 }
 
 val localProperties = Properties().apply {
@@ -25,8 +27,8 @@ android {
         applicationId = "io.github.neuralcoherence.probe"
         minSdk = 29
         targetSdk = 35
-        versionCode = 122
-        versionName = "1.2.1-fix"
+        versionCode = 130
+        versionName = "1.3.0"
         buildConfigField("String", "SYNC_SIGNING_SALT", "\"${syncSigningSalt.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
 
     }
@@ -61,4 +63,11 @@ android {
 
 dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
+    testImplementation("junit:junit:4.13.2")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
 }

@@ -87,28 +87,34 @@
 .
 |-- app/
 |   |-- build.gradle.kts                 # Android 模块配置与本地构建参数
-|   `-- src/main/
+|   |-- src/main/
 |       |-- AndroidManifest.xml          # Android 应用清单
-|       |-- java/io/github/neuralcoherence/probe/
-|       |   |-- NeuralCoherenceModule.java # libxposed 入口、面板、扫描与互动逻辑
-|       |   |-- LiveUpdateClient.java      # 宿主进程通知桥接
-|       |   |-- LiveUpdateContract.java    # 进程间动作与字段约定
-|       |   |-- LiveUpdateNotification.java # 原生实时更新通知
-|       |   |-- LiveUpdateReceiver.java    # 模块端进度接收器
-|       |   |-- LiveUpdateStopReceiver.java # 通知停止操作
-|       |   |-- LiveUpdateTransition.java  # 完成态定时转换与兜底
-|       |   |-- LiveUpdateTransitionReceiver.java # 内部定时转换接收器
-|       |   `-- NotificationPermissionActivity.java # 通知设置与自检
+|       |-- kotlin/io/github/neuralcoherence/probe/
+|       |   |-- NeuralCoherenceModule.kt # libxposed 入口、Flutter 语义监测与面板
+|       |   |-- LiveUpdateClient.kt      # 宿主进程通知桥接
+|       |   |-- LiveUpdateContract.kt    # 进程间动作与字段约定
+|       |   |-- LiveUpdateNotification.kt # 原生实时更新通知
+|       |   |-- LiveUpdateReceiver.kt    # 模块端进度接收器
+|       |   |-- LiveUpdateStopReceiver.kt # 通知停止操作
+|       |   |-- LiveUpdateTransition.kt  # 完成态定时转换与兜底
+|       |   |-- LiveUpdateTransitionReceiver.kt # 内部定时转换接收器
+|       |   |-- NotificationPermissionActivity.kt # 通知设置与自检
+|       |   `-- core/
+|       |       |-- InteractionEngine.kt # 扫描、互动、签名与错误映射
+|       |       |-- ModuleTaskCoordinator.kt # 扫描与互动任务互斥状态
+|       |       |-- PanelLayoutCalculator.kt # 自适应面板布局
+|       |       `-- SemanticPageClassifier.kt # 页面语义判定
 |       |-- res/drawable/                # 通知图标
 |       |-- res/values/strings.xml       # 模块名称和说明
 |       `-- resources/META-INF/xposed/
 |           |-- java_init.list           # libxposed Java 入口
 |           |-- module.prop              # API 版本及模块属性
 |           `-- scope.list               # 默认目标作用域
+|   `-- src/test/kotlin/                  # Kotlin 纯逻辑回归测试
 |-- docs/
 |   |-- ROOTLESS_GUIDE.md                # NPatch 无 Root 图文安装教程
 |   `-- images/                          # 教程图片
-|-- build.gradle.kts                     # Android Gradle Plugin 配置
+|-- build.gradle.kts                     # Android Gradle Plugin 与 Kotlin 配置
 |-- gradle/wrapper/                      # Gradle 8.9 Wrapper
 |-- gradlew / gradlew.bat                # 跨平台构建入口
 |-- gradle.properties                    # Gradle 构建选项
