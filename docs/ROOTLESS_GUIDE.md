@@ -12,7 +12,7 @@ NPatch 会将 libxposed 加载器和模块配置注入「同调计划」宿主 A
 > - 卸载应用会清除本地数据，请提前确认账号和登录方式。
 > - 微信、QQ 等第三方登录可能因签名校验而无法使用，建议使用手机号登录。
 > - 「同调计划」更新后，需要重新下载新版 APK 并按照本教程打包。
-> - **必须使用本教程提供的 NPatch 测试版（已验证 `v1.0.6-723`）。**仅支持
+> - **必须使用本教程提供的 NPatch 测试版（已验证 `v1.0.6-724`）。**仅支持
 >   libxposed API 101 的稳定版无法加载本模块；其他免 Root 框架不保证兼容。
 >
 > 如果按照教程操作后仍遇到模块加载、扫描、互动或通知问题，可以前往
@@ -42,13 +42,13 @@ NPatch 是支持 Legacy、libxposed API 101 和 API 102 的无 Root Xposed 注�
 
 - 开源项目：[7723mod/NPatch](https://github.com/7723mod/NPatch/)
 - 最新测试版发布消息：[Telegram](https://t.me/onpatch/206)
-- 测试版备用下载：[蓝奏云](https://wwaoz.lanzoum.com/iJqHm3xcf3if)
-- 蓝奏云密码：`2xbp`
+- 测试版备用下载（`NPatch-v1.0.6-724-release.apk`）：[蓝奏云](https://wwaoz.lanzoum.com/iJaw73y64v7g)
+- 蓝奏云密码：`e1oy`
 
 > [!IMPORTANT]
 > Neural Coherence Tool 使用 **libxposed API 102**。
 >
-> 请使用上方链接提供的 NPatch 测试版（已验证 `v1.0.6-723`），或明确标注支持
+> 请使用上方链接提供的 NPatch 测试版（已验证 `v1.0.6-724`），或明确标注支持
 > libxposed API 102 的后续测试版。**不要使用仅支持 API 101 的 NPatch 稳定版**，
 > 否则模块不会被加载。
 

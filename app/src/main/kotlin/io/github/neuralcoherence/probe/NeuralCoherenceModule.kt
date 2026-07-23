@@ -33,6 +33,7 @@ import io.github.neuralcoherence.probe.core.InteractionEngine
 import io.github.neuralcoherence.probe.core.ModuleTask
 import io.github.neuralcoherence.probe.core.ModuleTaskCoordinator
 import io.github.neuralcoherence.probe.core.PanelLayoutCalculator
+import io.github.neuralcoherence.probe.core.RateLimitException
 import io.github.neuralcoherence.probe.core.SemanticPageClassifier
 import java.lang.ref.WeakReference
 import java.lang.reflect.Field
@@ -361,26 +362,114 @@ class NeuralCoherenceModule : XposedModule() {
         val remaining=REPEAT_GUARD_MS-(System.currentTimeMillis()-state.getLong(LAST_BATCH_STARTED_AT,0))
         if (remaining>0) { AlertDialog.Builder(activity).setTitle("操作过于频繁").setMessage("最近一次批量互动刚刚完成。为避免短时间重复请求，请约 ${max(1,(remaining+59999)/60000)} 分钟后再试；扫描功能仍可正常使用。").setPositiveButton("确定",null).show(); return }
         if (!state.getBoolean(LIVE_UPDATE_SETUP_SEEN,false) && LiveUpdateClient.openSettings(activity)) { state.edit().putBoolean(LIVE_UPDATE_SETUP_SEEN,true).apply(); return }
-        AlertDialog.Builder(activity).setTitle("一键互动").setMessage("将重新扫描好友，并依次向所有尚未完成今日互动的好友发送请求。\n\n无色发送 ping，绿色发送 pong；蓝色和橙色跳过。每次间隔 0.5 至 1 秒，运行中可手动停止，操作不可撤销。")
+        AlertDialog.Builder(activity).setTitle("一键互动").setMessage("将重新扫描好友，并依次向所有尚未完成今日互动的好友发送请求。\n\n无色发送 ping，绿色发送 pong；蓝色和橙色跳过。每次间隔 1.5 至 3 秒，遇到服务器限流时等待 20 秒并重试一次。运行中可手动停止，操作不可撤销。")
             .setNegativeButton("取消",null).setNeutralButton("实时通知") { _,_->LiveUpdateClient.openSettings(activity) }.setPositiveButton("确认执行") { _,_->startBatchInteraction(activity,panel) }.show()
     }
 
     private fun startBatchInteraction(activity: Activity, panel: ControlPanel) {
         if (!taskCoordinator.tryStart(ModuleTask.INTERACTING)) return
         stopRequested.set(false)
-        updatePanel(true,"扫描中",0,0); LiveUpdateClient.update(activity,"扫描好友",0,0,0,true)
+        updatePanel(true, "扫描中", 0, 0)
+        LiveUpdateClient.update(activity, "扫描好友", 0, 0, 0, true)
         networkExecutor.execute {
-            val result=InteractionResult()
+            val result = InteractionResult()
             try {
-                val scan=interactionEngine.scanAllFriends(activity) { page,pages -> if(stopRequested.get()) throw StopRequestedException(); updatePanel(true,"扫描 $page/$pages",page,pages); LiveUpdateClient.update(activity,"扫描好友",page,pages,0,false) }
-                result.eligible=scan.candidates.size; LiveUpdateClient.update(activity,"互动好友",0,result.eligible,0,true)
-                scan.candidates.forEachIndexed { index,candidate -> if(stopRequested.get()) throw StopRequestedException(); val current=index+1; updatePanel(true,"互动 $current/${result.eligible}",current,result.eligible); interactionEngine.sendInteraction(scan.session,candidate); if(candidate.action=="ping") result.ping++ else result.pong++; LiveUpdateClient.update(activity,"互动好友",current,result.eligible,result.ping+result.pong,false); if(current<result.eligible) Thread.sleep(ThreadLocalRandom.current().nextLong(MIN_ACTION_DELAY_MS,MAX_ACTION_DELAY_MS+1)) }
+                val scan = interactionEngine.scanAllFriends(activity) { page, pages ->
+                    ensureInteractionContinues()
+                    updatePanel(true, "扫描 $page/$pages", page, pages)
+                    LiveUpdateClient.update(activity, "扫描好友", page, pages, 0, false)
+                }
+                result.eligible = scan.candidates.size
+                LiveUpdateClient.update(activity, "准备互动", 0, result.eligible, 0, true)
+                if (result.eligible > 0) {
+                    updatePanel(true, "准备互动", 0, result.eligible)
+                    waitCancellable(INITIAL_ACTION_DELAY_MS)
+                }
+                scan.candidates.forEachIndexed { index, candidate ->
+                    ensureInteractionContinues()
+                    val current = index + 1
+                    updatePanel(true, "互动 $current/${result.eligible}", current, result.eligible)
+                    sendInteractionWithSingleRateLimitRetry(
+                        activity,
+                        scan.session,
+                        candidate,
+                        current,
+                        result,
+                    )
+                    if (candidate.action == "ping") result.ping++ else result.pong++
+                    LiveUpdateClient.update(
+                        activity,
+                        "互动好友",
+                        current,
+                        result.eligible,
+                        result.ping + result.pong,
+                        false,
+                    )
+                    if (current < result.eligible) {
+                        waitCancellable(
+                            ThreadLocalRandom.current().nextLong(
+                                MIN_ACTION_DELAY_MS,
+                                MAX_ACTION_DELAY_MS + 1,
+                            ),
+                        )
+                    }
+                }
                 activity.getSharedPreferences(MODULE_STATE_PREFS,Context.MODE_PRIVATE).edit().putLong(LAST_BATCH_STARTED_AT,System.currentTimeMillis()).apply()
                 showInteractionResult(result,null)
             } catch (_: StopRequestedException) { result.stopped=true; showInteractionResult(result,null) }
             catch (error: Throwable) { log(Log.ERROR,TAG,"Interaction stopped: ${error.javaClass.simpleName}"); showInteractionResult(result,error) }
             finally { stopRequested.set(false); taskCoordinator.finish(ModuleTask.INTERACTING) }
         }
+    }
+
+    private fun sendInteractionWithSingleRateLimitRetry(
+        activity: Activity,
+        session: String,
+        candidate: Candidate,
+        current: Int,
+        result: InteractionResult,
+    ) {
+        try {
+            interactionEngine.sendInteraction(session, candidate)
+        } catch (_: RateLimitException) {
+            log(Log.WARN, TAG, "Rate limited during ${candidate.action}; retrying once")
+            LiveUpdateClient.update(
+                activity,
+                "限流等待",
+                current,
+                result.eligible,
+                result.ping + result.pong,
+                true,
+            )
+            waitForRateLimitRetry(current, result.eligible)
+            ensureInteractionContinues()
+            updatePanel(true, "重试 $current/${result.eligible}", current, result.eligible)
+            interactionEngine.sendInteraction(session, candidate)
+        }
+    }
+
+    private fun waitForRateLimitRetry(current: Int, total: Int) {
+        var remainingSeconds = RATE_LIMIT_RETRY_DELAY_MS / 1000L
+        while (remainingSeconds > 0) {
+            ensureInteractionContinues()
+            updatePanel(true, "限流等待 ${remainingSeconds}s", current, total)
+            Thread.sleep(1000L)
+            remainingSeconds--
+        }
+    }
+
+    private fun waitCancellable(durationMillis: Long) {
+        var remaining = durationMillis
+        while (remaining > 0L) {
+            ensureInteractionContinues()
+            val slice = min(remaining, STOP_CHECK_INTERVAL_MS)
+            Thread.sleep(slice)
+            remaining -= slice
+        }
+    }
+
+    private fun ensureInteractionContinues() {
+        if (stopRequested.get()) throw StopRequestedException()
     }
 
     private fun showInteractionResult(result: InteractionResult, error: Throwable?) {
@@ -436,7 +525,7 @@ class NeuralCoherenceModule : XposedModule() {
 
     companion object {
         private const val TARGET_PACKAGE="com.linktech.arkradar"; private const val TAG="NeuralCoherenceTool"; private const val PANEL_TAG="syncproject_interaction_panel"; private const val MODULE_STATE_PREFS="syncproject_module_state"; private const val LAST_BATCH_STARTED_AT="last_batch_started_at"; private const val LIVE_UPDATE_SETUP_SEEN="live_update_setup_seen"
-        private const val REPEAT_GUARD_MS=600_000L; private const val MIN_ACTION_DELAY_MS=500L; private const val MAX_ACTION_DELAY_MS=1000L; private const val SEMANTIC_POLL_INTERVAL_MS=1500L; private const val SEMANTIC_POLL_COALESCE_MS=250L; private val SEMANTIC_TAP_CHECK_DELAYS_MS=longArrayOf(150,500,1000); private const val PANEL_DESIRED_WIDTH_DP=128; private const val PANEL_MIN_WIDTH_DP=112; private const val PANEL_HEIGHT_DP=44; private const val PANEL_ANCHOR_PADDING_DP=4; private const val PANEL_ANCHOR_GRACE_MS=3000L
+        private const val REPEAT_GUARD_MS=600_000L; private const val MIN_ACTION_DELAY_MS=1500L; private const val MAX_ACTION_DELAY_MS=3000L; private const val INITIAL_ACTION_DELAY_MS=3000L; private const val RATE_LIMIT_RETRY_DELAY_MS=20_000L; private const val STOP_CHECK_INTERVAL_MS=250L; private const val SEMANTIC_POLL_INTERVAL_MS=1500L; private const val SEMANTIC_POLL_COALESCE_MS=250L; private val SEMANTIC_TAP_CHECK_DELAYS_MS=longArrayOf(150,500,1000); private const val PANEL_DESIRED_WIDTH_DP=128; private const val PANEL_MIN_WIDTH_DP=112; private const val PANEL_HEIGHT_DP=44; private const val PANEL_ANCHOR_PADDING_DP=4; private const val PANEL_ANCHOR_GRACE_MS=3000L
         private val networkExecutor=Executors.newSingleThreadExecutor(); private val taskCoordinator=ModuleTaskCoordinator(); private val stopRequested=AtomicBoolean(false)
         private const val MAX_FLUTTER_SEMANTICS_ENABLE_ATTEMPTS=3
         private fun dp(context:Context,value:Int)=kotlin.math.round(value*context.resources.displayMetrics.density).toInt()

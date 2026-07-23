@@ -9,7 +9,7 @@
 > 本模块已经验证可通过 **NPatch** 在无 Root 设备上运行。该方式需要重新打包「同调计划」
 > 宿主 APK，并使用 **Stealth** 绕过签名校验。
 >
-> **必须使用无 Root 教程中提供的 NPatch 测试版（已验证 `v1.0.6-723`）。**
+> **必须使用无 Root 教程中提供的 NPatch 测试版（已验证 `v1.0.6-724`）。**
 > 仅支持 libxposed API 101 的 NPatch 稳定版无法加载本模块。
 >
 > 重新打包后的应用签名与官方版本不同，因此无法直接覆盖安装。请先卸载官方版本，并提前
@@ -32,9 +32,14 @@
 
 - 无色状态发送 `ping`，绿色状态发送 `pong`。
 - 蓝色和橙色表示当日已完成对应操作，自动跳过。
-- 请求按顺序执行，间隔在 500 至 1000 毫秒之间随机选择。
-- 任一请求失败后立即停止，不继续处理后续好友。
+- 请求按顺序执行，间隔在 1.5 至 3 秒之间随机选择。
+- 服务端提示请求频繁或返回 HTTP 429 时，将等待 20 秒并重试本次请求一次。
+- 重试成功后继续处理剩余好友；其他请求失败或重试仍受限时立即停止任务。
 - 运行期间可通过面板手动停止。
+
+> [!NOTE]
+> 考虑到批量互动可能给「同调计划」服务器带来额外压力，模块已适当延长自动互动间隔。
+> 实测约 500 位待互动好友需要约 20 分钟完成，具体耗时会随好友数量、网络状况和服务端响应变化。
 
 ### 页面面板
 
@@ -64,7 +69,7 @@
 ## 兼容性
 
 - LSPosed/libxposed API：102
-- 无 Root 框架：NPatch 测试版 `v1.0.6-723`，或明确支持 libxposed API 102 的后续测试版
+- 无 Root 框架：NPatch 测试版 `v1.0.6-724`，或明确支持 libxposed API 102 的后续测试版
 - Android：最低 API 29
 - 架构：模块本身不包含 native 库
 - 作用域：`com.linktech.arkradar`
@@ -101,6 +106,7 @@
 |       |   |-- NotificationPermissionActivity.kt # 通知设置与自检
 |       |   `-- core/
 |       |       |-- InteractionEngine.kt # 扫描、互动、签名与错误映射
+|       |       |-- InteractionRateLimit.kt # 请求间隔、限流识别与单次重试策略
 |       |       |-- ModuleTaskCoordinator.kt # 扫描与互动任务互斥状态
 |       |       |-- PanelLayoutCalculator.kt # 自适应面板布局
 |       |       `-- SemanticPageClassifier.kt # 页面语义判定
@@ -196,3 +202,9 @@ app/build/outputs/apk/debug/app-debug.apk
 
 「同调计划」及相关名称、图标和应用内容归其原开发者所有。本项目是独立的第三方开源工具，
 与「同调计划」官方不存在隶属、授权或合作关系。
+
+## 联系与反馈
+
+若有相关建议，或本项目侵犯了您的合法权益，可通过
+[GitHub Issues](https://github.com/YuapXc/Neural-Coherence-Tool/issues) 反馈，或联系开发者邮箱：
+[yuapxc@qq.com](mailto:yuapxc@qq.com)。

@@ -83,10 +83,17 @@ internal class InteractionEngine {
         val stream = if (status in 200..299) connection.inputStream else connection.errorStream
         val responseText = stream?.use(::readUtf8).orEmpty()
         connection.disconnect()
+        if (status == 429) {
+            throw RateLimitException(candidate.action, "服务器限制了请求频率，请稍后再试")
+        }
         if (status != HttpURLConnection.HTTP_OK) throw httpStatusError(status)
         val response = JSONObject(responseText)
-        check(response.optBoolean("succ", false)) {
-            "${candidate.action} 失败：${response.optString("msg", "服务器拒绝请求")}"
+        if (!response.optBoolean("succ", false)) {
+            val message = response.optString("msg", "服务器拒绝请求")
+            if (InteractionRateLimit.isExplicit(message)) {
+                throw RateLimitException(candidate.action, message)
+            }
+            throw IllegalStateException("${candidate.action} 失败：$message")
         }
     }
 
