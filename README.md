@@ -1,5 +1,7 @@
 # Neural Coherence Tool
 
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
+
 基于 [libxposed API 102](https://libxposed.github.io/api/index.html) 的 LSPosed 模块，
 为方舟雷达的官方 APP [同调计划](https://www.tongdiaojihua.com/) 提供顺序互动。
 
@@ -190,6 +192,14 @@ app/build/outputs/apk/debug/app-debug.apk
 - 好友 ID 只用于当前请求，不写入磁盘。
 - 接口结构不符合预期时采用失败关闭策略，不猜测字段含义。
 - 发布前应再次运行敏感信息扫描，并使用独立 release 签名构建 APK。
+
+## 开源协议
+
+Copyright (C) 2026 YuapXc
+
+本项目以 [GNU General Public License v3.0 or later](LICENSE)（SPDX：
+`GPL-3.0-or-later`）发布。您可以使用、修改和再分发本项目；分发原版或修改版时，须遵守
+GPLv3 的许可证与对应源代码提供要求，并保留相关版权及许可证声明。
 
 ## 致谢
 
