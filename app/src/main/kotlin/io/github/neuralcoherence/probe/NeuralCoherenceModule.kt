@@ -29,6 +29,8 @@ import android.widget.TextView
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
 import io.github.neuralcoherence.probe.core.Candidate
+import io.github.neuralcoherence.probe.core.HeaderBounds
+import io.github.neuralcoherence.probe.core.HeaderBoundsResolver
 import io.github.neuralcoherence.probe.core.InteractionEngine
 import io.github.neuralcoherence.probe.core.ModuleTask
 import io.github.neuralcoherence.probe.core.ModuleTaskCoordinator
@@ -242,6 +244,7 @@ class NeuralCoherenceModule : XposedModule() {
         var visited = 0
         val networkTitles = mutableListOf<SemanticAnchor>()
         val settingsEntries = mutableListOf<SemanticAnchor>()
+        val friendCounts = mutableListOf<Rect>()
         for (node in tree.values) {
             if (node == null || visited++ >= 2000) continue
             ensureSemanticsNodeFields(node.javaClass)
@@ -249,15 +252,17 @@ class NeuralCoherenceModule : XposedModule() {
             values.forEach { state = SemanticPageClassifier.inspectText(state, it) }
             val network = values.any { semanticTextContains(it, "同调网络") }
             val settings = values.any { semanticTextContains(it, "设置特别通讯") }
-            if (network || settings) getSemanticBounds(node)?.takeUnless(Rect::isEmpty)?.let { bounds ->
+            val friendCount = values.any(SemanticPageClassifier::isFriendCountText)
+            if (network || settings || friendCount) getSemanticBounds(node)?.takeUnless(Rect::isEmpty)?.let { bounds ->
                 val candidate = SemanticAnchor(node, bounds)
                 if (network) networkTitles += candidate
                 if (settings) settingsEntries += candidate
+                if (friendCount) friendCounts += Rect(bounds)
             }
         }
         semanticAccessFailureLogged = false
         if (!SemanticPageClassifier.isMainPage(state)) SemanticPageResult.hidden()
-        else SemanticPageResult(true, flutterView, selectPanelAnchor(networkTitles, settingsEntries))
+        else SemanticPageResult(true, flutterView, selectPanelAnchor(networkTitles, settingsEntries, friendCounts))
     } catch (error: Throwable) {
         if (!semanticAccessFailureLogged) { semanticAccessFailureLogged = true; log(Log.WARN, TAG, "Flutter semantics unavailable: ${error.javaClass.simpleName}") }
             SemanticPageResult.hidden()
@@ -298,7 +303,11 @@ class NeuralCoherenceModule : XposedModule() {
         return channel
     }
 
-    private fun selectPanelAnchor(networks: List<SemanticAnchor>, settings: List<SemanticAnchor>): PanelAnchor? {
+    private fun selectPanelAnchor(
+        networks: List<SemanticAnchor>,
+        settings: List<SemanticAnchor>,
+        friendCounts: List<Rect>,
+    ): PanelAnchor? {
         var pair: Pair<SemanticAnchor, SemanticAnchor>? = null; var bestOverlap=Int.MIN_VALUE; var bestDistance=Int.MAX_VALUE
         for (network in networks) for (setting in settings) {
             if (setting.bounds.left <= network.bounds.right) continue
@@ -307,7 +316,33 @@ class NeuralCoherenceModule : XposedModule() {
             if (overlap<=0 && distance>max(network.bounds.height(),setting.bounds.height())) continue
             if (overlap>bestOverlap || overlap==bestOverlap && distance<bestDistance) { pair=network to setting; bestOverlap=overlap; bestDistance=distance }
         }
-        return pair?.let { PanelAnchor(it.first.bounds, expandToSettingsEntryBounds(it.second,it.first.bounds)) }
+        return pair?.let { (network, setting) ->
+            val networkBounds = expandToNetworkEntryBounds(network, setting.bounds)
+            networkBounds.right = HeaderBoundsResolver.expandNetworkRight(
+                network = networkBounds.toHeaderBounds(),
+                settingsLeft = setting.bounds.left,
+                friendCounts = friendCounts.map { it.toHeaderBounds() },
+            )
+            PanelAnchor(networkBounds, expandToSettingsEntryBounds(setting, networkBounds))
+        }
+    }
+
+    private fun expandToNetworkEntryBounds(network: SemanticAnchor, setting: Rect): Rect {
+        var best = Rect(network.bounds)
+        var parent = semanticsParentField?.get(network.node)
+        var depth = 0
+        while (parent != null && depth++ < 4) {
+            val bounds = getSemanticBounds(parent) ?: break
+            if (
+                bounds.isEmpty ||
+                !bounds.contains(network.bounds) ||
+                bounds.right >= setting.left ||
+                bounds.height() > max(1, network.bounds.height()) * 3
+            ) break
+            best = bounds
+            parent = semanticsParentField?.get(parent)
+        }
+        return best
     }
 
     private fun expandToSettingsEntryBounds(setting: SemanticAnchor, network: Rect): Rect {
@@ -322,10 +357,13 @@ class NeuralCoherenceModule : XposedModule() {
 
     private fun getSemanticBounds(node: Any): Rect? = (semanticsGlobalRectMethod?.invoke(node) as? Rect)?.let(::Rect)
 
+    private fun Rect.toHeaderBounds() = HeaderBounds(left, top, right, bottom)
+
     private fun layoutPanelBetweenAnchors(activity: Activity, content: FrameLayout, panel: View, flutterView: View?, anchor: PanelAnchor): Boolean {
         if (flutterView == null || content.width <= 0 || content.height <= 0) return false
         val fl=IntArray(2); val cl=IntArray(2); flutterView.getLocationOnScreen(fl); content.getLocationOnScreen(cl)
         val placement=PanelLayoutCalculator.calculate(anchor.networkTitle.right,anchor.networkTitle.centerY(),anchor.settingsEntry.left,anchor.settingsEntry.centerY(),dp(activity,PANEL_ANCHOR_PADDING_DP),dp(activity,PANEL_MIN_WIDTH_DP),dp(activity,PANEL_DESIRED_WIDTH_DP),dp(activity,PANEL_HEIGHT_DP),fl[0],fl[1],cl[0],cl[1],content.width,content.height) ?: return false
+        currentPanel.get()?.takeIf { it.root === panel }?.setCompact(placement.width < dp(activity, PANEL_COMPACT_THRESHOLD_DP))
         val p=panel.layoutParams as FrameLayout.LayoutParams
         if (p.width!=placement.width || p.height!=placement.height || p.leftMargin!=placement.left || p.topMargin!=placement.top || p.gravity!=(Gravity.TOP or Gravity.START)) {
             p.width=placement.width; p.height=placement.height; p.gravity=Gravity.TOP or Gravity.START; p.leftMargin=placement.left; p.topMargin=placement.top; p.rightMargin=0; panel.layoutParams=p
@@ -362,7 +400,7 @@ class NeuralCoherenceModule : XposedModule() {
         val remaining=REPEAT_GUARD_MS-(System.currentTimeMillis()-state.getLong(LAST_BATCH_STARTED_AT,0))
         if (remaining>0) { AlertDialog.Builder(activity).setTitle("操作过于频繁").setMessage("最近一次批量互动刚刚完成。为避免短时间重复请求，请约 ${max(1,(remaining+59999)/60000)} 分钟后再试；扫描功能仍可正常使用。").setPositiveButton("确定",null).show(); return }
         if (!state.getBoolean(LIVE_UPDATE_SETUP_SEEN,false) && LiveUpdateClient.openSettings(activity)) { state.edit().putBoolean(LIVE_UPDATE_SETUP_SEEN,true).apply(); return }
-        AlertDialog.Builder(activity).setTitle("一键互动").setMessage("将重新扫描好友，并依次向所有尚未完成今日互动的好友发送请求。\n\n无色发送 ping，绿色发送 pong；蓝色和橙色跳过。每次间隔 1.5 至 3 秒，遇到服务器限流时等待 20 秒并重试一次。运行中可手动停止，操作不可撤销。")
+        AlertDialog.Builder(activity).setTitle("一键互动").setMessage("将重新扫描好友，并依次向所有尚未完成今日互动的好友发送请求。\n\n无色发送 ping，绿色发送 pong；蓝色和橙色跳过。每次间隔 0.5 至 1.5 秒，遇到服务器限流时等待 20 秒并重试一次。运行中可手动停止，操作不可撤销。")
             .setNegativeButton("取消",null).setNeutralButton("实时通知") { _,_->LiveUpdateClient.openSettings(activity) }.setPositiveButton("确认执行") { _,_->startBatchInteraction(activity,panel) }.show()
     }
 
@@ -500,12 +538,16 @@ class NeuralCoherenceModule : XposedModule() {
 
     private fun createOverlayButton(activity:Activity,text:String,fill:Int,stroke:Int)=Button(activity).apply { this.text=text;setTextColor(Color.WHITE);textSize=14f;isAllCaps=false;minWidth=dp(activity,104);minHeight=dp(activity,44);setPadding(dp(activity,14),0,dp(activity,14),0);background=GradientDrawable().apply { setColor(fill);cornerRadius=dp(activity,6).toFloat();setStroke(dp(activity,1),stroke) } }
 
-    private inner class ControlPanel(context:Context) {
+    private inner class ControlPanel(private val context:Context) {
         val root=LinearLayout(context); val status=TextView(context); val progress=ProgressBar(context,null,android.R.attr.progressBarStyleHorizontal); val scan:Button; val action:Button
+        private val row=LinearLayout(context)
+        private var compact=false
+        private var fullStatus="待扫描"
         init { root.orientation=LinearLayout.VERTICAL;root.gravity=Gravity.CENTER_VERTICAL;root.setPadding(dp(context,6),dp(context,3),dp(context,6),dp(context,3));root.background=GradientDrawable().apply { setColor(Color.argb(225,20,23,24));cornerRadius=dp(context,4).toFloat();setStroke(dp(context,1),Color.rgb(63,72,74)) }
-            val row=LinearLayout(context).apply { orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL }; status.text="待扫描";status.setTextColor(Color.rgb(71,226,244));status.textSize=11f;status.gravity=Gravity.CENTER_VERTICAL;status.isSingleLine=true;row.addView(status,LinearLayout.LayoutParams(0,dp(context,24),1f));scan=compactButton(context,"扫描",Color.rgb(0,105,125),Color.rgb(46,218,239));action=compactButton(context,"互动",Color.rgb(151,79,0),Color.rgb(255,170,40));row.addView(scan,LinearLayout.LayoutParams(dp(context,34),dp(context,24)).apply { leftMargin=dp(context,3) });row.addView(action,LinearLayout.LayoutParams(dp(context,34),dp(context,24)).apply { leftMargin=dp(context,3) });root.addView(row,LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(context,25)));progress.max=100;progress.progress=0;progress.progressTintList=ColorStateList.valueOf(Color.rgb(44,220,239));progress.progressBackgroundTintList=ColorStateList.valueOf(Color.rgb(49,56,58));root.addView(progress,LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(context,2)).apply { topMargin=dp(context,2) }) }
+            row.orientation=LinearLayout.HORIZONTAL;row.gravity=Gravity.CENTER_VERTICAL;status.text=fullStatus;status.setTextColor(Color.rgb(71,226,244));status.textSize=11f;status.gravity=Gravity.CENTER_VERTICAL;status.isSingleLine=true;row.addView(status,LinearLayout.LayoutParams(0,dp(context,24),1f));scan=compactButton(context,"扫描",Color.rgb(0,105,125),Color.rgb(46,218,239));action=compactButton(context,"互动",Color.rgb(151,79,0),Color.rgb(255,170,40));row.addView(scan,LinearLayout.LayoutParams(dp(context,34),dp(context,24)).apply { leftMargin=dp(context,3) });row.addView(action,LinearLayout.LayoutParams(dp(context,34),dp(context,24)).apply { leftMargin=dp(context,3) });root.addView(row,LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(context,25)));progress.max=100;progress.progress=0;progress.progressTintList=ColorStateList.valueOf(Color.rgb(44,220,239));progress.progressBackgroundTintList=ColorStateList.valueOf(Color.rgb(49,56,58));root.addView(progress,LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(context,2)).apply { topMargin=dp(context,2) }) }
         private fun compactButton(context:Context,text:String,fill:Int,stroke:Int)=createOverlayButton(context as Activity,text,fill,stroke).apply { textSize=11f;minWidth=0;minHeight=0;minimumWidth=0;minimumHeight=0;setPadding(0,0,0,0) }
-        fun setStatus(text:String,value:Int,maximum:Int) { status.text=text;progress.max=max(1,maximum);progress.progress=max(0,min(value,max(1,maximum))) }
+        fun setCompact(value:Boolean) { if(compact==value)return;compact=value;renderLayout() }
+        fun setStatus(text:String,value:Int,maximum:Int) { fullStatus=text;status.text=presentStatus(text);progress.max=max(1,maximum);progress.progress=max(0,min(value,max(1,maximum))) }
         fun setRunning(running:Boolean) = setTaskState(if(running) ModuleTask.INTERACTING else ModuleTask.IDLE)
         fun setTaskState(task:ModuleTask) {
             scan.visibility=if(task==ModuleTask.INTERACTING)View.GONE else View.VISIBLE
@@ -514,6 +556,35 @@ class NeuralCoherenceModule : XposedModule() {
             action.text=if(task==ModuleTask.INTERACTING)"停止" else "互动"
             action.setTextColor(if(task==ModuleTask.INTERACTING)Color.rgb(255,210,210) else Color.WHITE)
             action.alpha=if(task==ModuleTask.SCANNING)0.45f else 1f
+            renderLayout()
+        }
+        private fun renderLayout() {
+            val horizontalPadding=dp(context,if(compact)4 else 6)
+            root.setPadding(horizontalPadding,dp(context,3),horizontalPadding,dp(context,3))
+            status.textSize=if(compact)10f else 11f
+            status.text=presentStatus(fullStatus)
+            val buttonWidth=dp(context,if(compact)28 else 34)
+            val buttonMargin=dp(context,if(compact)2 else 3)
+            listOf(scan,action).forEach { button ->
+                (button.layoutParams as? LinearLayout.LayoutParams)?.let { params ->
+                    params.width=buttonWidth
+                    params.leftMargin=buttonMargin
+                    button.layoutParams=params
+                }
+            }
+            row.gravity=Gravity.CENTER_VERTICAL
+        }
+        private fun presentStatus(text:String):String {
+            if(!compact)return text
+            return when {
+                text=="待扫描" -> "待"
+                text.startsWith("扫描") -> "扫"
+                text.startsWith("互动") -> "互"
+                "限流" in text || text.startsWith("等待") -> Regex("""\d+""").find(text)?.value?.let { "等$it" } ?: "等"
+                "停止" in text -> "停"
+                "完成" in text -> "成"
+                else -> text.take(2)
+            }
         }
     }
 
@@ -525,7 +596,7 @@ class NeuralCoherenceModule : XposedModule() {
 
     companion object {
         private const val TARGET_PACKAGE="com.linktech.arkradar"; private const val TAG="NeuralCoherenceTool"; private const val PANEL_TAG="syncproject_interaction_panel"; private const val MODULE_STATE_PREFS="syncproject_module_state"; private const val LAST_BATCH_STARTED_AT="last_batch_started_at"; private const val LIVE_UPDATE_SETUP_SEEN="live_update_setup_seen"
-        private const val REPEAT_GUARD_MS=600_000L; private const val MIN_ACTION_DELAY_MS=1500L; private const val MAX_ACTION_DELAY_MS=3000L; private const val INITIAL_ACTION_DELAY_MS=3000L; private const val RATE_LIMIT_RETRY_DELAY_MS=20_000L; private const val STOP_CHECK_INTERVAL_MS=250L; private const val SEMANTIC_POLL_INTERVAL_MS=1500L; private const val SEMANTIC_POLL_COALESCE_MS=250L; private val SEMANTIC_TAP_CHECK_DELAYS_MS=longArrayOf(150,500,1000); private const val PANEL_DESIRED_WIDTH_DP=128; private const val PANEL_MIN_WIDTH_DP=112; private const val PANEL_HEIGHT_DP=44; private const val PANEL_ANCHOR_PADDING_DP=4; private const val PANEL_ANCHOR_GRACE_MS=3000L
+        private const val REPEAT_GUARD_MS=600_000L; private const val MIN_ACTION_DELAY_MS=500L; private const val MAX_ACTION_DELAY_MS=1500L; private const val INITIAL_ACTION_DELAY_MS=3000L; private const val RATE_LIMIT_RETRY_DELAY_MS=20_000L; private const val STOP_CHECK_INTERVAL_MS=250L; private const val SEMANTIC_POLL_INTERVAL_MS=1500L; private const val SEMANTIC_POLL_COALESCE_MS=250L; private val SEMANTIC_TAP_CHECK_DELAYS_MS=longArrayOf(150,500,1000); private const val PANEL_DESIRED_WIDTH_DP=128; private const val PANEL_MIN_WIDTH_DP=92; private const val PANEL_COMPACT_THRESHOLD_DP=112; private const val PANEL_HEIGHT_DP=44; private const val PANEL_ANCHOR_PADDING_DP=4; private const val PANEL_ANCHOR_GRACE_MS=3000L
         private val networkExecutor=Executors.newSingleThreadExecutor(); private val taskCoordinator=ModuleTaskCoordinator(); private val stopRequested=AtomicBoolean(false)
         private const val MAX_FLUTTER_SEMANTICS_ENABLE_ATTEMPTS=3
         private fun dp(context:Context,value:Int)=kotlin.math.round(value*context.resources.displayMetrics.density).toInt()

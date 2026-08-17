@@ -33,4 +33,12 @@ class SemanticPageClassifierTest {
 
         assertFalse(SemanticPageClassifier.isMainPage(state))
     }
+
+    @Test
+    fun `recognizes standalone friend totals`() {
+        assertTrue(SemanticPageClassifier.isFriendCountText("（523）"))
+        assertTrue(SemanticPageClassifier.isFriendCountText("(1114)"))
+        assertTrue(SemanticPageClassifier.isFriendCountText("68"))
+        assertFalse(SemanticPageClassifier.isFriendCountText("同调记录 1114"))
+    }
 }

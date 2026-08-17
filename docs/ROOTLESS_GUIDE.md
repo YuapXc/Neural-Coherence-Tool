@@ -12,8 +12,8 @@ NPatch 会将 libxposed 加载器和模块配置注入「同调计划」宿主 A
 > - 卸载应用会清除本地数据，请提前确认账号和登录方式。
 > - 微信、QQ 等第三方登录可能因签名校验而无法使用，建议使用手机号登录。
 > - 「同调计划」更新后，需要重新下载新版 APK 并按照本教程打包。
-> - **必须使用本教程提供的 NPatch 测试版（已验证 `v1.0.6-724`）。**仅支持
->   libxposed API 101 的稳定版无法加载本模块；其他免 Root 框架不保证兼容。
+> - **必须使用支持 libxposed API 102 的 NPatch `v1.0.7` 或后续版本。**仅支持 API 101
+>   的旧版本无法加载本模块；其他免 Root 框架不保证兼容。
 >
 > 如果按照教程操作后仍遇到模块加载、扫描、互动或通知问题，可以前往
 > [Issues](https://github.com/YuapXc/Neural-Coherence-Tool/issues) 反馈。
@@ -41,16 +41,19 @@ sync_project_v202.apk
 NPatch 是支持 Legacy、libxposed API 101 和 API 102 的无 Root Xposed 注入工具。
 
 - 开源项目：[7723mod/NPatch](https://github.com/7723mod/NPatch/)
+- 官方 `v1.0.7` Release：[GitHub](https://github.com/7723mod/NPatch/releases/tag/v1.0.7)
 - 最新测试版发布消息：[Telegram](https://t.me/onpatch/206)
-- 测试版备用下载（`NPatch-v1.0.6-724-release.apk`）：[蓝奏云](https://wwaoz.lanzoum.com/iJaw73y64v7g)
-- 蓝奏云密码：`e1oy`
+- `v1.0.7` 备用下载：[蓝奏云](https://wwaoz.lanzoum.com/iy2rP42v8vpc)
+- 蓝奏云密码：`a7ac`
 
 > [!IMPORTANT]
 > Neural Coherence Tool 使用 **libxposed API 102**。
 >
-> 请使用上方链接提供的 NPatch 测试版（已验证 `v1.0.6-724`），或明确标注支持
-> libxposed API 102 的后续测试版。**不要使用仅支持 API 101 的 NPatch 稳定版**，
-> 否则模块不会被加载。
+> 请使用 NPatch `v1.0.7` 或 Release 说明明确标注支持 libxposed API 102 的后续版本。
+> **不要使用仅支持 API 101 的版本**，否则模块不会被加载。
+>
+> NPatch 官方建议从 `v1.0.6` 或更旧版本升级时先卸载旧 Manager，再安装 `v1.0.7`，
+> 避免缓存残留或旧数据结构冲突。卸载 Manager 前请记下现有作用域和打包配置。
 
 ### 3. Neural Coherence Tool
 
@@ -170,6 +173,10 @@ NPatch 是支持 Legacy、libxposed API 101 和 API 102 的无 Root Xposed 注�
 2. 是否在 NPatch 的「模块作用域」中勾选 Neural Coherence Tool。
 3. 是否强制停止并重新打开了「同调计划」。
 4. 当前页面是否为「同调网络」主页。
+
+如果以上配置均正确但日志提示无法连接 NPatch manager，或宿主缓存的模块列表为空，请先打开并
+保持 NPatch 运行，再返回 NPatch 对「同调计划」执行一次「强制重启」。小米等后台限制较严的
+系统建议同时允许 NPatch 自启动和后台运行，避免设备重启后首次打开宿主时模块尚未加载。
 
 ### 微信或 QQ 无法登录
 
