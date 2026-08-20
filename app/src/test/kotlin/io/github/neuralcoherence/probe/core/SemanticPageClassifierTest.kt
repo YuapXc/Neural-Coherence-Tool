@@ -41,4 +41,12 @@ class SemanticPageClassifierTest {
         assertTrue(SemanticPageClassifier.isFriendCountText("68"))
         assertFalse(SemanticPageClassifier.isFriendCountText("同调记录 1114"))
     }
+
+    @Test
+    fun `recognizes old and new header actions`() {
+        assertTrue(SemanticPageClassifier.isHeaderActionText("设置特别通讯"))
+        assertTrue(SemanticPageClassifier.isHeaderActionText("+添加好友"))
+        assertTrue(SemanticPageClassifier.isHeaderActionText("添加好友"))
+        assertFalse(SemanticPageClassifier.isHeaderActionText("好友申请"))
+    }
 }

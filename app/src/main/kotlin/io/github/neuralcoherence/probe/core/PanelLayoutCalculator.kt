@@ -14,7 +14,7 @@ object PanelLayoutCalculator {
     fun calculate(
         networkRight: Int,
         networkCenterY: Int,
-        settingsLeft: Int,
+        headerActionLeft: Int,
         settingsCenterY: Int,
         padding: Int,
         minimumWidth: Int,
@@ -27,7 +27,7 @@ object PanelLayoutCalculator {
         contentWidth: Int,
         contentHeight: Int,
     ): PanelPlacement? {
-        val availableWidth = settingsLeft - networkRight - padding * 2
+        val availableWidth = headerActionLeft - networkRight - padding * 2
         if (availableWidth < minimumWidth) return null
 
         val width = minOf(desiredWidth, availableWidth)

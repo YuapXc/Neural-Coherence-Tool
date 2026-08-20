@@ -243,7 +243,7 @@ class NeuralCoherenceModule : XposedModule() {
         var state = 0
         var visited = 0
         val networkTitles = mutableListOf<SemanticAnchor>()
-        val settingsEntries = mutableListOf<SemanticAnchor>()
+        val headerActions = mutableListOf<SemanticAnchor>()
         val friendCounts = mutableListOf<Rect>()
         for (node in tree.values) {
             if (node == null || visited++ >= 2000) continue
@@ -251,18 +251,18 @@ class NeuralCoherenceModule : XposedModule() {
             val values = listOf(semanticsLabelField, semanticsValueField, semanticsHintField, semanticsTooltipField, semanticsIdentifierField).map { it?.get(node) }
             values.forEach { state = SemanticPageClassifier.inspectText(state, it) }
             val network = values.any { semanticTextContains(it, "同调网络") }
-            val settings = values.any { semanticTextContains(it, "设置特别通讯") }
+            val headerAction = values.any(SemanticPageClassifier::isHeaderActionText)
             val friendCount = values.any(SemanticPageClassifier::isFriendCountText)
-            if (network || settings || friendCount) getSemanticBounds(node)?.takeUnless(Rect::isEmpty)?.let { bounds ->
+            if (network || headerAction || friendCount) getSemanticBounds(node)?.takeUnless(Rect::isEmpty)?.let { bounds ->
                 val candidate = SemanticAnchor(node, bounds)
                 if (network) networkTitles += candidate
-                if (settings) settingsEntries += candidate
+                if (headerAction) headerActions += candidate
                 if (friendCount) friendCounts += Rect(bounds)
             }
         }
         semanticAccessFailureLogged = false
         if (!SemanticPageClassifier.isMainPage(state)) SemanticPageResult.hidden()
-        else SemanticPageResult(true, flutterView, selectPanelAnchor(networkTitles, settingsEntries, friendCounts))
+        else SemanticPageResult(true, flutterView, selectPanelAnchor(networkTitles, headerActions, friendCounts))
     } catch (error: Throwable) {
         if (!semanticAccessFailureLogged) { semanticAccessFailureLogged = true; log(Log.WARN, TAG, "Flutter semantics unavailable: ${error.javaClass.simpleName}") }
             SemanticPageResult.hidden()
@@ -305,25 +305,25 @@ class NeuralCoherenceModule : XposedModule() {
 
     private fun selectPanelAnchor(
         networks: List<SemanticAnchor>,
-        settings: List<SemanticAnchor>,
+        headerActions: List<SemanticAnchor>,
         friendCounts: List<Rect>,
     ): PanelAnchor? {
         var pair: Pair<SemanticAnchor, SemanticAnchor>? = null; var bestOverlap=Int.MIN_VALUE; var bestDistance=Int.MAX_VALUE
-        for (network in networks) for (setting in settings) {
-            if (setting.bounds.left <= network.bounds.right) continue
-            val overlap=min(network.bounds.bottom,setting.bounds.bottom)-max(network.bounds.top,setting.bounds.top)
-            val distance=abs(network.bounds.centerY()-setting.bounds.centerY())
-            if (overlap<=0 && distance>max(network.bounds.height(),setting.bounds.height())) continue
-            if (overlap>bestOverlap || overlap==bestOverlap && distance<bestDistance) { pair=network to setting; bestOverlap=overlap; bestDistance=distance }
+        for (network in networks) for (headerAction in headerActions) {
+            if (headerAction.bounds.left <= network.bounds.right) continue
+            val overlap=min(network.bounds.bottom,headerAction.bounds.bottom)-max(network.bounds.top,headerAction.bounds.top)
+            val distance=abs(network.bounds.centerY()-headerAction.bounds.centerY())
+            if (overlap<=0 && distance>max(network.bounds.height(),headerAction.bounds.height())) continue
+            if (overlap>bestOverlap || overlap==bestOverlap && distance<bestDistance) { pair=network to headerAction; bestOverlap=overlap; bestDistance=distance }
         }
-        return pair?.let { (network, setting) ->
-            val networkBounds = expandToNetworkEntryBounds(network, setting.bounds)
+        return pair?.let { (network, headerAction) ->
+            val networkBounds = expandToNetworkEntryBounds(network, headerAction.bounds)
             networkBounds.right = HeaderBoundsResolver.expandNetworkRight(
                 network = networkBounds.toHeaderBounds(),
-                settingsLeft = setting.bounds.left,
+                headerActionLeft = headerAction.bounds.left,
                 friendCounts = friendCounts.map { it.toHeaderBounds() },
             )
-            PanelAnchor(networkBounds, expandToSettingsEntryBounds(setting, networkBounds))
+            PanelAnchor(networkBounds, expandToHeaderActionBounds(headerAction, networkBounds))
         }
     }
 
@@ -345,11 +345,11 @@ class NeuralCoherenceModule : XposedModule() {
         return best
     }
 
-    private fun expandToSettingsEntryBounds(setting: SemanticAnchor, network: Rect): Rect {
-        var best=Rect(setting.bounds); var parent=semanticsParentField?.get(setting.node); var depth=0
+    private fun expandToHeaderActionBounds(headerAction: SemanticAnchor, network: Rect): Rect {
+        var best=Rect(headerAction.bounds); var parent=semanticsParentField?.get(headerAction.node); var depth=0
         while (parent!=null && depth++<4) {
             val bounds=getSemanticBounds(parent) ?: break
-            if (bounds.isEmpty || !bounds.contains(setting.bounds) || bounds.left<=network.right || bounds.width()>max(1,setting.bounds.width())*3 || bounds.height()>max(1,setting.bounds.height())*3) break
+            if (bounds.isEmpty || !bounds.contains(headerAction.bounds) || bounds.left<=network.right || bounds.width()>max(1,headerAction.bounds.width())*3 || bounds.height()>max(1,headerAction.bounds.height())*3) break
             best=bounds; parent=semanticsParentField?.get(parent)
         }
         return best
@@ -362,7 +362,7 @@ class NeuralCoherenceModule : XposedModule() {
     private fun layoutPanelBetweenAnchors(activity: Activity, content: FrameLayout, panel: View, flutterView: View?, anchor: PanelAnchor): Boolean {
         if (flutterView == null || content.width <= 0 || content.height <= 0) return false
         val fl=IntArray(2); val cl=IntArray(2); flutterView.getLocationOnScreen(fl); content.getLocationOnScreen(cl)
-        val placement=PanelLayoutCalculator.calculate(anchor.networkTitle.right,anchor.networkTitle.centerY(),anchor.settingsEntry.left,anchor.settingsEntry.centerY(),dp(activity,PANEL_ANCHOR_PADDING_DP),dp(activity,PANEL_MIN_WIDTH_DP),dp(activity,PANEL_DESIRED_WIDTH_DP),dp(activity,PANEL_HEIGHT_DP),fl[0],fl[1],cl[0],cl[1],content.width,content.height) ?: return false
+        val placement=PanelLayoutCalculator.calculate(anchor.networkTitle.right,anchor.networkTitle.centerY(),anchor.headerAction.left,anchor.headerAction.centerY(),dp(activity,PANEL_ANCHOR_PADDING_DP),dp(activity,PANEL_MIN_WIDTH_DP),dp(activity,PANEL_DESIRED_WIDTH_DP),dp(activity,PANEL_HEIGHT_DP),fl[0],fl[1],cl[0],cl[1],content.width,content.height) ?: return false
         currentPanel.get()?.takeIf { it.root === panel }?.setCompact(placement.width < dp(activity, PANEL_COMPACT_THRESHOLD_DP))
         val p=panel.layoutParams as FrameLayout.LayoutParams
         if (p.width!=placement.width || p.height!=placement.height || p.leftMargin!=placement.left || p.topMargin!=placement.top || p.gravity!=(Gravity.TOP or Gravity.START)) {
@@ -589,7 +589,7 @@ class NeuralCoherenceModule : XposedModule() {
     }
 
     private class SemanticAnchor(val node:Any,bounds:Rect) { val bounds=Rect(bounds) }
-    private data class PanelAnchor(val networkTitle:Rect,val settingsEntry:Rect)
+    private data class PanelAnchor(val networkTitle:Rect,val headerAction:Rect)
     private data class SemanticPageResult(val mainPage:Boolean,val flutterView:View?,val anchor:PanelAnchor?) { companion object { fun hidden()=SemanticPageResult(false,null,null) } }
     private data class InteractionResult(var eligible:Int=0,var ping:Int=0,var pong:Int=0,var stopped:Boolean=false)
     private class StopRequestedException:RuntimeException()

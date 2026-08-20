@@ -18,13 +18,13 @@ object HeaderBoundsResolver {
     @JvmStatic
     fun expandNetworkRight(
         network: HeaderBounds,
-        settingsLeft: Int,
+        headerActionLeft: Int,
         friendCounts: List<HeaderBounds>,
     ): Int = friendCounts.asSequence()
         .filter { candidate ->
             candidate.right > network.right &&
-                candidate.left < settingsLeft &&
-                candidate.right < settingsLeft &&
+                candidate.left < headerActionLeft &&
+                candidate.right < headerActionLeft &&
                 verticalOverlap(network, candidate) > 0 &&
                 kotlin.math.abs(candidate.centerY - network.centerY) <=
                 maxOf(network.height, candidate.height)

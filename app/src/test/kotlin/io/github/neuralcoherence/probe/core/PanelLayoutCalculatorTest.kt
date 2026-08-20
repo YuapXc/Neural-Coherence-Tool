@@ -8,7 +8,7 @@ import org.junit.Test
 class PanelLayoutCalculatorTest {
     @Test
     fun `centers desired width between anchors`() {
-        val placement = calculate(settingsLeft = 400)
+        val placement = calculate(headerActionLeft = 400)
 
         assertNotNull(placement)
         assertEquals(PanelPlacement(left = 194, top = 45, width = 128, height = 44), placement)
@@ -16,7 +16,7 @@ class PanelLayoutCalculatorTest {
 
     @Test
     fun `shrinks to available width at minimum boundary`() {
-        val placement = calculate(settingsLeft = 220)
+        val placement = calculate(headerActionLeft = 220)
 
         assertNotNull(placement)
         assertEquals(112, placement?.width)
@@ -25,7 +25,7 @@ class PanelLayoutCalculatorTest {
 
     @Test
     fun `rejects space narrower than minimum`() {
-        assertNull(calculate(settingsLeft = 219))
+        assertNull(calculate(headerActionLeft = 219))
     }
 
     @Test
@@ -33,7 +33,7 @@ class PanelLayoutCalculatorTest {
         val placement = PanelLayoutCalculator.calculate(
             networkRight = 0,
             networkCenterY = 0,
-            settingsLeft = 200,
+            headerActionLeft = 200,
             settingsCenterY = 0,
             padding = 4,
             minimumWidth = 112,
@@ -51,11 +51,11 @@ class PanelLayoutCalculatorTest {
         assertEquals(0, placement?.top)
     }
 
-    private fun calculate(settingsLeft: Int): PanelPlacement? =
+    private fun calculate(headerActionLeft: Int): PanelPlacement? =
         PanelLayoutCalculator.calculate(
             networkRight = 100,
             networkCenterY = 50,
-            settingsLeft = settingsLeft,
+            headerActionLeft = headerActionLeft,
             settingsCenterY = 54,
             padding = 4,
             minimumWidth = 112,

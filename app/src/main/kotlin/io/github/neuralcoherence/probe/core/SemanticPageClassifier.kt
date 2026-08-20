@@ -3,6 +3,7 @@ package io.github.neuralcoherence.probe.core
 /** Pure classifier for the Flutter semantics text exposed by the host app. */
 object SemanticPageClassifier {
     private val FRIEND_COUNT_PATTERN = Regex("""^\s*[（(]?\s*\d{1,7}\s*[）)]?\s*$""")
+    private val HEADER_ACTION_TEXTS = arrayOf("设置特别通讯", "添加好友")
     private const val ANCHOR_NETWORK = 1
     private const val ANCHOR_RECORDS = 1 shl 1
     private const val ANCHOR_REQUESTS = 1 shl 2
@@ -37,4 +38,8 @@ object SemanticPageClassifier {
     @JvmStatic
     fun isFriendCountText(value: Any?): Boolean =
         value is CharSequence && FRIEND_COUNT_PATTERN.matches(value)
+
+    @JvmStatic
+    fun isHeaderActionText(value: Any?): Boolean =
+        value is CharSequence && HEADER_ACTION_TEXTS.any(value::contains)
 }
