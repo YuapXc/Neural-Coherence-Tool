@@ -20,6 +20,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.FrameLayout
@@ -65,6 +66,7 @@ class NeuralCoherenceModule : XposedModule() {
     private var semanticTouchMoved = false
     private var semanticAccessFailureLogged = false
     private var semanticAnchorFailureLogged = false
+    @Volatile private var interactionKeepsScreenOn = false
     private var lastPanelAnchor: PanelAnchor? = null
     private var lastPanelAnchorAt = 0L
     private var cachedFlutterView = WeakReference<View?>(null)
@@ -100,6 +102,7 @@ class NeuralCoherenceModule : XposedModule() {
             val activity = chain.thisObject as Activity
             log(Log.INFO, TAG, "FlutterActivity resumed: ${activity.javaClass.name}")
             installScanButton(activity)
+            if (interactionKeepsScreenOn) applyInteractionScreenAwake(activity, true)
             startSemanticMonitor(activity)
             result
         }
@@ -400,13 +403,14 @@ class NeuralCoherenceModule : XposedModule() {
         val remaining=REPEAT_GUARD_MS-(System.currentTimeMillis()-state.getLong(LAST_BATCH_STARTED_AT,0))
         if (remaining>0) { AlertDialog.Builder(activity).setTitle("操作过于频繁").setMessage("最近一次批量互动刚刚完成。为避免短时间重复请求，请约 ${max(1,(remaining+59999)/60000)} 分钟后再试；扫描功能仍可正常使用。").setPositiveButton("确定",null).show(); return }
         if (!state.getBoolean(LIVE_UPDATE_SETUP_SEEN,false) && LiveUpdateClient.openSettings(activity)) { state.edit().putBoolean(LIVE_UPDATE_SETUP_SEEN,true).apply(); return }
-        AlertDialog.Builder(activity).setTitle("一键互动").setMessage("将重新扫描好友，并依次向所有尚未完成今日互动的好友发送请求。\n\n无色发送 ping，绿色发送 pong；蓝色和橙色跳过。每次间隔 0.5 至 1.5 秒，遇到服务器限流时等待 20 秒并重试一次。运行中可手动停止，操作不可撤销。")
+        AlertDialog.Builder(activity).setTitle("一键互动").setMessage("将重新扫描好友，并依次向所有尚未完成今日互动的好友发送请求。\n\n无色发送 ping，绿色发送 pong；蓝色和橙色跳过。每次间隔 0.5 至 1.5 秒，遇到服务器限流时等待 20 秒并重试一次。执行期间将保持屏幕常亮，运行中可手动停止，操作不可撤销。")
             .setNegativeButton("取消",null).setNeutralButton("实时通知") { _,_->LiveUpdateClient.openSettings(activity) }.setPositiveButton("确认执行") { _,_->startBatchInteraction(activity,panel) }.show()
     }
 
     private fun startBatchInteraction(activity: Activity, panel: ControlPanel) {
         if (!taskCoordinator.tryStart(ModuleTask.INTERACTING)) return
         stopRequested.set(false)
+        setInteractionScreenAwake(true)
         updatePanel(true, "扫描中", 0, 0)
         LiveUpdateClient.update(activity, "扫描好友", 0, 0, 0, true)
         networkExecutor.execute {
@@ -456,8 +460,23 @@ class NeuralCoherenceModule : XposedModule() {
                 showInteractionResult(result,null)
             } catch (_: StopRequestedException) { result.stopped=true; showInteractionResult(result,null) }
             catch (error: Throwable) { log(Log.ERROR,TAG,"Interaction stopped: ${error.javaClass.simpleName}"); showInteractionResult(result,error) }
-            finally { stopRequested.set(false); taskCoordinator.finish(ModuleTask.INTERACTING) }
+            finally { stopRequested.set(false); taskCoordinator.finish(ModuleTask.INTERACTING); setInteractionScreenAwake(false) }
         }
+    }
+
+    private fun setInteractionScreenAwake(enabled: Boolean) {
+        interactionKeepsScreenOn = enabled
+        currentActivity.get()?.let { applyInteractionScreenAwake(it, enabled) }
+    }
+
+    private fun applyInteractionScreenAwake(activity: Activity, enabled: Boolean) {
+        val update = {
+            if (!activity.isDestroyed) {
+                if (enabled) activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                else activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) update() else mainHandler.post(update)
     }
 
     private fun sendInteractionWithSingleRateLimitRetry(
