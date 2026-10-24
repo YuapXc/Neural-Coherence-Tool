@@ -11,3 +11,4 @@ signing.properties
 captures/
 reverse-output/
 /dist/
+__pycache__/

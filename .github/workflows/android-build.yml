@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "发布标签（如 v1.3.4）；留空时仅构建签名 APK"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -20,25 +26,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Run tests, lint, and build
         run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
           chmod +x gradlew
           ./gradlew testDebugUnitTest lintRelease assembleRelease
 
   signed-apk:
     name: Build signed APK
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: verify
     runs-on: ubuntu-latest
     env:
@@ -49,16 +56,16 @@ jobs:
       SYNC_SIGNING_SALT: ${{ secrets.SYNC_SIGNING_SALT }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Restore release signing
         shell: bash
@@ -82,10 +89,43 @@ jobs:
           ./gradlew assembleRelease
 
       - name: Upload signed APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Neural-Coherence-Tool-signed-${{ github.sha }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish release
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release_tag != ''
+    needs: signed-apk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download signed APK
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: Neural-Coherence-Tool-signed-${{ github.sha }}
+          path: release-apk
+
+      - name: Generate notes and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_notes.py \
+            --tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" \
+            --expected-commit "$GITHUB_SHA" --output release-notes.md
+          cp release-apk/app-release.apk "NEURAL-COHERENCE-TOOL-${RELEASE_TAG}.apk"
+          gh release create "$RELEASE_TAG" "NEURAL-COHERENCE-TOOL-${RELEASE_TAG}.apk" \
+            --verify-tag --title "${RELEASE_TAG#v}" --notes-file release-notes.md
 

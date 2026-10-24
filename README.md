@@ -126,7 +126,7 @@
 |   |-- ROOTLESS_GUIDE.md                # NPatch 无 Root 图文安装教程
 |   `-- images/                          # 教程图片
 |-- build.gradle.kts                     # Android Gradle Plugin 与 Kotlin 配置
-|-- gradle/wrapper/                      # Gradle 8.9 Wrapper
+|-- gradle/wrapper/                      # Gradle 8.14.6 Wrapper（含 SHA-256 校验）
 |-- gradlew / gradlew.bat                # 跨平台构建入口
 |-- gradle.properties                    # Gradle 构建选项
 |-- settings.gradle.kts                  # 仓库与模块声明
@@ -174,6 +174,21 @@ app/build/outputs/apk/debug/app-debug.apk
 ```
 
 签名后的 APK 输出到 `app/build/outputs/apk/release/app-release.apk`。
+
+### CI 构建与发布
+
+在 GitHub Actions 中手动运行 **Android Build**，选择 `main` 分支：
+
+- `release_tag` 留空：运行测试、Lint 并构建签名 APK，可在运行结果的 Artifacts 中下载。
+- `release_tag` 填写版本标签（如 `v1.3.4`）：构建成功后自动发布 Release，并上传签名 APK。
+
+发布前需先更新模块版本、提交并推送，再为该提交创建并推送版本标签。标签必须指向本次
+构建的提交；Release 标题使用版本号，说明自动列出上一版本标签之后的非合并提交标题、
+各提交链接和完整对比链接。首次发布则列出全部非合并提交。发布所用的标签需要遵循
+`v1.3.4`、`v1.2.1-fix` 这类版本格式；已存在的 Release 不会被覆盖。
+
+特别提醒、测试致谢等内容可在发布后手动补充。签名依赖仓库中配置好的 GitHub Actions
+Secrets，与本地构建使用同一密钥。
 
 安装后在 LSPosed 中启用模块，将作用域设置为目标应用，再强制停止并重新打开目标应用。
 
