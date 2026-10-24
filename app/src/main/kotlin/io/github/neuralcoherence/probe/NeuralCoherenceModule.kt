@@ -33,6 +33,7 @@ import io.github.neuralcoherence.probe.core.Candidate
 import io.github.neuralcoherence.probe.core.HeaderBounds
 import io.github.neuralcoherence.probe.core.HeaderBoundsResolver
 import io.github.neuralcoherence.probe.core.InteractionEngine
+import io.github.neuralcoherence.probe.core.InteractionCancellation
 import io.github.neuralcoherence.probe.core.ModuleTask
 import io.github.neuralcoherence.probe.core.ModuleTaskCoordinator
 import io.github.neuralcoherence.probe.core.PanelLayoutCalculator
@@ -43,7 +44,6 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadLocalRandom
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -85,6 +85,7 @@ class NeuralCoherenceModule : XposedModule() {
     private var semanticsHintField: Field? = null
     private var semanticsTooltipField: Field? = null
     private var semanticsIdentifierField: Field? = null
+    private var semanticsTextFields = emptyArray<Field?>()
     private var semanticsParentField: Field? = null
     private var semanticsGlobalRectMethod: Method? = null
     private var liveUpdateStopReceiverRegistered = false
@@ -143,7 +144,7 @@ class NeuralCoherenceModule : XposedModule() {
         panel.scan.setOnClickListener { startDryRunScan(activity, panel) }
         panel.action.setOnClickListener {
             if (taskCoordinator.state == ModuleTask.INTERACTING) {
-                stopRequested.set(true)
+                interactionCancellation.requestStop()
                 panel.action.text = "停止中"
             } else confirmBatchInteraction(activity, panel)
         }
@@ -157,7 +158,7 @@ class NeuralCoherenceModule : XposedModule() {
             override fun onReceive(receiverContext: Context?, intent: Intent?) {
                 if (intent?.action != LiveUpdateContract.ACTION_STOP_TARGET || !LiveUpdateClient.isTrustedModuleSender(this)) return
                 if (taskCoordinator.state == ModuleTask.INTERACTING) {
-                    stopRequested.set(true)
+                    interactionCancellation.requestStop()
                     updatePanel(true, "停止中", savedProgress, savedMaximum)
                 }
             }
@@ -196,7 +197,11 @@ class NeuralCoherenceModule : XposedModule() {
     private fun runSemanticMonitor(activity: Activity, generation: Int) {
         if (generation != semanticMonitorGeneration || activity.isFinishing || activity.isDestroyed) return
         if (SystemClock.uptimeMillis() - lastSemanticCheckAt >= SEMANTIC_POLL_COALESCE_MS) updatePanelVisibilityFromSemantics(activity)
-        mainHandler.postDelayed({ runSemanticMonitor(activity, generation) }, SEMANTIC_POLL_INTERVAL_MS)
+        // Taps still trigger the existing fast checks; unattended tasks need fewer full scans.
+        val interval = if (taskCoordinator.state == ModuleTask.INTERACTING) {
+            INTERACTION_SEMANTIC_POLL_INTERVAL_MS
+        } else SEMANTIC_POLL_INTERVAL_MS
+        mainHandler.postDelayed({ runSemanticMonitor(activity, generation) }, interval)
     }
 
     private fun scheduleSemanticChecks(activity: Activity) {
@@ -249,13 +254,19 @@ class NeuralCoherenceModule : XposedModule() {
         val headerActions = mutableListOf<SemanticAnchor>()
         val friendCounts = mutableListOf<Rect>()
         for (node in tree.values) {
-            if (node == null || visited++ >= 2000) continue
+            if (node == null) continue
+            if (visited++ >= 2000) break
             ensureSemanticsNodeFields(node.javaClass)
-            val values = listOf(semanticsLabelField, semanticsValueField, semanticsHintField, semanticsTooltipField, semanticsIdentifierField).map { it?.get(node) }
-            values.forEach { state = SemanticPageClassifier.inspectText(state, it) }
-            val network = values.any { semanticTextContains(it, "同调网络") }
-            val headerAction = values.any(SemanticPageClassifier::isHeaderActionText)
-            val friendCount = values.any(SemanticPageClassifier::isFriendCountText)
+            var network = false
+            var headerAction = false
+            var friendCount = false
+            for (field in semanticsTextFields) {
+                val value = field?.get(node) ?: continue
+                state = SemanticPageClassifier.inspectText(state, value)
+                network = network || semanticTextContains(value, "同调网络")
+                headerAction = headerAction || SemanticPageClassifier.isHeaderActionText(value)
+                friendCount = friendCount || SemanticPageClassifier.isFriendCountText(value)
+            }
             if (network || headerAction || friendCount) getSemanticBounds(node)?.takeUnless(Rect::isEmpty)?.let { bounds ->
                 val candidate = SemanticAnchor(node, bounds)
                 if (network) networkTitles += candidate
@@ -390,6 +401,7 @@ class NeuralCoherenceModule : XposedModule() {
     private fun ensureSemanticsNodeFields(type: Class<*>) {
         if (type==cachedSemanticsNodeClass) return
         semanticsLabelField=findField(type,"label"); semanticsValueField=findField(type,"value"); semanticsHintField=findField(type,"hint"); semanticsTooltipField=findField(type,"tooltip"); semanticsIdentifierField=findField(type,"identifier"); semanticsParentField=findField(type,"parent"); semanticsGlobalRectMethod=findMethod(type,"getGlobalRect"); cachedSemanticsNodeClass=type
+        semanticsTextFields = arrayOf(semanticsLabelField, semanticsValueField, semanticsHintField, semanticsTooltipField, semanticsIdentifierField)
     }
 
     private fun findFlutterView(view: View): View? {
@@ -409,7 +421,7 @@ class NeuralCoherenceModule : XposedModule() {
 
     private fun startBatchInteraction(activity: Activity, panel: ControlPanel) {
         if (!taskCoordinator.tryStart(ModuleTask.INTERACTING)) return
-        stopRequested.set(false)
+        interactionCancellation.reset()
         setInteractionScreenAwake(true)
         updatePanel(true, "扫描中", 0, 0)
         LiveUpdateClient.update(activity, "扫描好友", 0, 0, 0, true)
@@ -460,7 +472,7 @@ class NeuralCoherenceModule : XposedModule() {
                 showInteractionResult(result,null)
             } catch (_: StopRequestedException) { result.stopped=true; showInteractionResult(result,null) }
             catch (error: Throwable) { log(Log.ERROR,TAG,"Interaction stopped: ${error.javaClass.simpleName}"); showInteractionResult(result,error) }
-            finally { stopRequested.set(false); taskCoordinator.finish(ModuleTask.INTERACTING); setInteractionScreenAwake(false) }
+            finally { taskCoordinator.finish(ModuleTask.INTERACTING); setInteractionScreenAwake(false) }
         }
     }
 
@@ -510,23 +522,17 @@ class NeuralCoherenceModule : XposedModule() {
         while (remainingSeconds > 0) {
             ensureInteractionContinues()
             updatePanel(true, "限流等待 ${remainingSeconds}s", current, total)
-            Thread.sleep(1000L)
+            waitCancellable(1000L)
             remainingSeconds--
         }
     }
 
     private fun waitCancellable(durationMillis: Long) {
-        var remaining = durationMillis
-        while (remaining > 0L) {
-            ensureInteractionContinues()
-            val slice = min(remaining, STOP_CHECK_INTERVAL_MS)
-            Thread.sleep(slice)
-            remaining -= slice
-        }
+        if (interactionCancellation.awaitStop(durationMillis)) throw StopRequestedException()
     }
 
     private fun ensureInteractionContinues() {
-        if (stopRequested.get()) throw StopRequestedException()
+        if (interactionCancellation.isStopRequested()) throw StopRequestedException()
     }
 
     private fun showInteractionResult(result: InteractionResult, error: Throwable?) {
@@ -561,14 +567,25 @@ class NeuralCoherenceModule : XposedModule() {
         val root=LinearLayout(context); val status=TextView(context); val progress=ProgressBar(context,null,android.R.attr.progressBarStyleHorizontal); val scan:Button; val action:Button
         private val row=LinearLayout(context)
         private var compact=false
+        private var renderedTask: ModuleTask? = null
         private var fullStatus="待扫描"
         init { root.orientation=LinearLayout.VERTICAL;root.gravity=Gravity.CENTER_VERTICAL;root.setPadding(dp(context,6),dp(context,3),dp(context,6),dp(context,3));root.background=GradientDrawable().apply { setColor(Color.argb(225,20,23,24));cornerRadius=dp(context,4).toFloat();setStroke(dp(context,1),Color.rgb(63,72,74)) }
             row.orientation=LinearLayout.HORIZONTAL;row.gravity=Gravity.CENTER_VERTICAL;status.text=fullStatus;status.setTextColor(Color.rgb(71,226,244));status.textSize=11f;status.gravity=Gravity.CENTER_VERTICAL;status.isSingleLine=true;row.addView(status,LinearLayout.LayoutParams(0,dp(context,24),1f));scan=compactButton(context,"扫描",Color.rgb(0,105,125),Color.rgb(46,218,239));action=compactButton(context,"互动",Color.rgb(151,79,0),Color.rgb(255,170,40));row.addView(scan,LinearLayout.LayoutParams(dp(context,34),dp(context,24)).apply { leftMargin=dp(context,3) });row.addView(action,LinearLayout.LayoutParams(dp(context,34),dp(context,24)).apply { leftMargin=dp(context,3) });root.addView(row,LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(context,25)));progress.max=100;progress.progress=0;progress.progressTintList=ColorStateList.valueOf(Color.rgb(44,220,239));progress.progressBackgroundTintList=ColorStateList.valueOf(Color.rgb(49,56,58));root.addView(progress,LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(context,2)).apply { topMargin=dp(context,2) }) }
         private fun compactButton(context:Context,text:String,fill:Int,stroke:Int)=createOverlayButton(context as Activity,text,fill,stroke).apply { textSize=11f;minWidth=0;minHeight=0;minimumWidth=0;minimumHeight=0;setPadding(0,0,0,0) }
         fun setCompact(value:Boolean) { if(compact==value)return;compact=value;renderLayout() }
-        fun setStatus(text:String,value:Int,maximum:Int) { fullStatus=text;status.text=presentStatus(text);progress.max=max(1,maximum);progress.progress=max(0,min(value,max(1,maximum))) }
+        fun setStatus(text:String,value:Int,maximum:Int) {
+            fullStatus=text
+            val display=presentStatus(text)
+            if (!status.text.contentEquals(display)) status.text=display
+            val safeMaximum=max(1,maximum)
+            val safeProgress=value.coerceIn(0,safeMaximum)
+            if (progress.max!=safeMaximum) progress.max=safeMaximum
+            if (progress.progress!=safeProgress) progress.progress=safeProgress
+        }
         fun setRunning(running:Boolean) = setTaskState(if(running) ModuleTask.INTERACTING else ModuleTask.IDLE)
         fun setTaskState(task:ModuleTask) {
+            if (renderedTask==task) return
+            renderedTask=task
             scan.visibility=if(task==ModuleTask.INTERACTING)View.GONE else View.VISIBLE
             scan.isEnabled=task==ModuleTask.IDLE
             action.isEnabled=task!=ModuleTask.SCANNING
@@ -615,8 +632,8 @@ class NeuralCoherenceModule : XposedModule() {
 
     companion object {
         private const val TARGET_PACKAGE="com.linktech.arkradar"; private const val TAG="NeuralCoherenceTool"; private const val PANEL_TAG="syncproject_interaction_panel"; private const val MODULE_STATE_PREFS="syncproject_module_state"; private const val LAST_BATCH_STARTED_AT="last_batch_started_at"; private const val LIVE_UPDATE_SETUP_SEEN="live_update_setup_seen"
-        private const val REPEAT_GUARD_MS=600_000L; private const val MIN_ACTION_DELAY_MS=500L; private const val MAX_ACTION_DELAY_MS=1500L; private const val INITIAL_ACTION_DELAY_MS=3000L; private const val RATE_LIMIT_RETRY_DELAY_MS=20_000L; private const val STOP_CHECK_INTERVAL_MS=250L; private const val SEMANTIC_POLL_INTERVAL_MS=1500L; private const val SEMANTIC_POLL_COALESCE_MS=250L; private val SEMANTIC_TAP_CHECK_DELAYS_MS=longArrayOf(150,500,1000); private const val PANEL_DESIRED_WIDTH_DP=128; private const val PANEL_MIN_WIDTH_DP=92; private const val PANEL_COMPACT_THRESHOLD_DP=112; private const val PANEL_HEIGHT_DP=44; private const val PANEL_ANCHOR_PADDING_DP=4; private const val PANEL_ANCHOR_GRACE_MS=3000L
-        private val networkExecutor=Executors.newSingleThreadExecutor(); private val taskCoordinator=ModuleTaskCoordinator(); private val stopRequested=AtomicBoolean(false)
+        private const val REPEAT_GUARD_MS=600_000L; private const val MIN_ACTION_DELAY_MS=500L; private const val MAX_ACTION_DELAY_MS=1500L; private const val INITIAL_ACTION_DELAY_MS=3000L; private const val RATE_LIMIT_RETRY_DELAY_MS=20_000L; private const val SEMANTIC_POLL_INTERVAL_MS=1500L; private const val INTERACTION_SEMANTIC_POLL_INTERVAL_MS=5000L; private const val SEMANTIC_POLL_COALESCE_MS=250L; private val SEMANTIC_TAP_CHECK_DELAYS_MS=longArrayOf(150,500,1000); private const val PANEL_DESIRED_WIDTH_DP=128; private const val PANEL_MIN_WIDTH_DP=92; private const val PANEL_COMPACT_THRESHOLD_DP=112; private const val PANEL_HEIGHT_DP=44; private const val PANEL_ANCHOR_PADDING_DP=4; private const val PANEL_ANCHOR_GRACE_MS=3000L
+        private val networkExecutor=Executors.newSingleThreadExecutor(); private val taskCoordinator=ModuleTaskCoordinator(); private val interactionCancellation=InteractionCancellation()
         private const val MAX_FLUTTER_SEMANTICS_ENABLE_ATTEMPTS=3
         private fun dp(context:Context,value:Int)=kotlin.math.round(value*context.resources.displayMetrics.density).toInt()
         private fun semanticTextContains(value:Any?,expected:String)=value is CharSequence && value.contains(expected)

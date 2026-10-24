@@ -10,7 +10,7 @@ import android.os.Build
 import android.os.SystemClock
 
 internal object LiveUpdateClient {
-    private const val MIN_UPDATE_INTERVAL_MS = 900L
+    private const val MIN_UPDATE_INTERVAL_MS = 3000L
     private var lastUpdateAt = 0L
     private var lastStage = ""
     private var lastCurrent = -1
